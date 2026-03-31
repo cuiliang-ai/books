@@ -25,13 +25,6 @@ jobs:
         with:
           mdbook-version: 'latest'
 
-      - name: Install mdbook-mermaid
-        run: |
-          curl -sL -o mdbook-mermaid.tar.gz https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz
-          tar xzf mdbook-mermaid.tar.gz
-          chmod +x mdbook-mermaid
-          mv mdbook-mermaid /usr/local/bin/
-
       - name: Create output directory
         run: mkdir -p output
 
