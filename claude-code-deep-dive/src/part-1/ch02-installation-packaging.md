@@ -1,9 +1,9 @@
 
 # 第 2 章：安装与打包 — 解剖 npm 包的内部结构
 
-> **核心问题**：当你执行 `npm install -g @anthropic-ai/claude-code` 时，你到底安装了什么？一个 50MB+ 的单文件 bundle 是如何生成的？我们又该如何从这个混淆后的"黑盒"中提取出可分析的源码？
+> **⚠️ 注意**：本章基于通过 npm 全局安装分发的 Claude Code (v2.1.86) 研究撰写。Anthropic 已弃用 npm 安装方式，改为通过 `bun build --compile` 将 TypeScript 代码与 Bun runtime（JavaScriptCore 引擎）打包为独立二进制文件分发，不再依赖 Node.js（[技术分析](https://www.frr.dev/posts/claude-code-native-build-bun/)）。当前推荐的安装方式为 `curl -fsSL https://claude.ai/install.sh | bash`（macOS/Linux）或通过 Homebrew / WinGet 安装。本章关于 npm 安装方式的描述已过时，但打包结构、混淆策略和反编译方法论的分析仍然适用。最新的安装方式请参阅 [Anthropic 官方文档](https://code.claude.com/docs/en/setup)。
 
-> **⚠️ 注意**：本章基于 v2.1.86 版本编写，当时 Claude Code 通过 npm 全局安装分发。Anthropic 已于后续版本弃用 npm 安装方式，改为通过 `bun build --compile` 将 TypeScript 代码与 Bun runtime（JavaScriptCore 引擎）打包为独立二进制文件分发，不再依赖 Node.js（[技术分析](https://www.frr.dev/posts/claude-code-native-build-bun/)）。当前推荐的安装方式为 `curl -fsSL https://claude.ai/install.sh | bash`（macOS/Linux）或通过 Homebrew / WinGet 安装。本章关于 npm 安装方式的描述已过时，但打包结构、混淆策略和反编译方法论的分析仍然适用。最新的安装方式请参阅 [Anthropic 官方文档](https://code.claude.com/docs/en/setup)。
+> **核心问题**：当你执行 `npm install -g @anthropic-ai/claude-code` 时，你到底安装了什么？一个 50MB+ 的单文件 bundle 是如何生成的？我们又该如何从这个混淆后的"黑盒"中提取出可分析的源码？
 
 Claude Code 以 npm 包的形式分发，只需一条命令即可安装。但"简单的安装"背后，是一套精心设计的打包策略 — 单文件 bundle、依赖内联、代码混淆、native 模块跨平台编译。理解这些，是阅读本书后续章节的前提：你需要知道"我们分析的对象长什么样"。
 
