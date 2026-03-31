@@ -7,7 +7,6 @@
 }
 
 .content main {
-    font-size: 1.05rem;
     line-height: 1.8;
     color: #2c3e50;
 }
@@ -48,7 +47,6 @@
     border: 1px solid #e1e4e8;
     border-radius: 3px;
     padding: 0.15em 0.4em;
-    font-size: 0.9em;
     color: #d63384;
 }
 
@@ -58,6 +56,7 @@
     border: none;
     padding: 0;
     color: inherit;
+    font-family: 'Cascadia Mono', 'JetBrains Mono', 'Source Code Pro', 'Consolas', monospace;
 }
 
 /* === Blockquotes - design decisions & notes === */
@@ -79,7 +78,6 @@
     border-collapse: collapse;
     width: 100%;
     margin: 1em 0;
-    font-size: 0.95rem;
 }
 
 .content main table th {
@@ -109,7 +107,6 @@
 /* Table code cells - don't wrap function names */
 .content main table code {
     white-space: nowrap;
-    font-size: 0.85em;
 }
 
 /* === Links === */
@@ -124,22 +121,7 @@
     border-bottom-color: #2563eb;
 }
 
-/* === ASCII art diagrams - preserve formatting === */
-.content main pre code {
-    font-family: 'Cascadia Mono', 'JetBrains Mono', 'Source Code Pro', 'Consolas', monospace;
-    font-size: 0.85em;
-    line-height: 1.4;
-}
-
 /* === Sidebar === */
-.sidebar .sidebar-scrollbox {
-    font-size: 0.9rem;
-}
-
-.sidebar .sidebar-scrollbox a {
-    color: inherit;
-}
-
 /* Active chapter highlight */
 .sidebar .sidebar-scrollbox .active {
     font-weight: 600;
