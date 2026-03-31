@@ -1,0 +1,187 @@
+/* Custom styles for Claude Code Deep Dive */
+/* Optimized for light theme readability with Chinese content */
+
+/* === Typography === */
+:root {
+    --content-max-width: 850px;
+}
+
+.content main {
+    line-height: 1.8;
+    color: #2c3e50;
+}
+
+/* Headings - stronger visual hierarchy */
+.content main h1 {
+    border-bottom: 2px solid #e0e0e0;
+    padding-bottom: 0.4em;
+    margin-top: 1.5em;
+    color: #1a1a2e;
+}
+
+.content main h2 {
+    border-bottom: 1px solid #eee;
+    padding-bottom: 0.3em;
+    margin-top: 2em;
+    color: #2c3e50;
+}
+
+.content main h3 {
+    margin-top: 1.6em;
+    color: #34495e;
+}
+
+/* === Code blocks - better contrast on light bg === */
+.content main pre {
+    background-color: #f6f8fa !important;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    padding: 16px;
+    line-height: 1.5;
+    overflow-x: auto;
+}
+
+/* Inline code */
+.content main code {
+    background-color: #f0f2f5;
+    border: 1px solid #e1e4e8;
+    border-radius: 3px;
+    padding: 0.15em 0.4em;
+    color: #d63384;
+}
+
+/* Code inside pre blocks - reset inline styles */
+.content main pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font-family: 'Cascadia Mono', 'JetBrains Mono', 'Source Code Pro', 'Consolas', monospace;
+}
+
+/* === Blockquotes - design decisions & notes === */
+.content main blockquote {
+    border-left: 4px solid #3498db;
+    background-color: #f8f9ff;
+    padding: 12px 20px;
+    margin: 1.2em 0;
+    border-radius: 0 4px 4px 0;
+    color: #2c3e50;
+}
+
+.content main blockquote strong {
+    color: #2980b9;
+}
+
+/* === Tables - readable with mixed CJK/Latin === */
+.content main table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+}
+
+.content main table th {
+    background-color: #f0f4f8;
+    border: 1px solid #d0d7de;
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    color: #1a1a2e;
+    white-space: nowrap;
+}
+
+.content main table td {
+    border: 1px solid #d0d7de;
+    padding: 8px 14px;
+    vertical-align: top;
+}
+
+.content main table tr:nth-child(even) {
+    background-color: #f8f9fa;
+}
+
+.content main table tr:hover {
+    background-color: #eef2f7;
+}
+
+/* Table code cells - don't wrap function names */
+.content main table code {
+    white-space: nowrap;
+}
+
+/* === Links === */
+.content main a {
+    color: #2563eb;
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.2s;
+}
+
+.content main a:hover {
+    border-bottom-color: #2563eb;
+}
+
+/* === Sidebar === */
+/* Active chapter highlight */
+.sidebar .sidebar-scrollbox .active {
+    font-weight: 600;
+}
+
+/* Part titles in sidebar */
+.sidebar .sidebar-scrollbox li.part-title {
+    font-weight: 700;
+    margin-top: 1em;
+    color: #1a1a2e;
+}
+
+/* === Dark theme overrides (navy/coal) === */
+.navy .content main,
+.coal .content main {
+    color: #c9d1d9;
+}
+
+.navy .content main pre,
+.coal .content main pre {
+    background-color: #1e2a3a !important;
+    border-color: #30414e;
+}
+
+.navy .content main blockquote,
+.coal .content main blockquote {
+    background-color: #1a2332;
+    border-left-color: #4a9eff;
+}
+
+.navy .content main table th,
+.coal .content main table th {
+    background-color: #1e2a3a;
+    border-color: #30414e;
+    color: #e0e0e0;
+}
+
+.navy .content main table td,
+.coal .content main table td {
+    border-color: #30414e;
+}
+
+.navy .content main table tr:nth-child(even),
+.coal .content main table tr:nth-child(even) {
+    background-color: #1a2332;
+}
+
+.navy .content main table tr:hover,
+.coal .content main table tr:hover {
+    background-color: #1e2d40;
+}
+
+.navy .content main code,
+.coal .content main code {
+    background-color: #1e2a3a;
+    border-color: #30414e;
+    color: #f0a8c0;
+}
+
+.navy .content main a,
+.coal .content main a {
+    color: #58a6ff;
+}

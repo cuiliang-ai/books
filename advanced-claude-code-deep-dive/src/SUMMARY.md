@@ -33,3 +33,10 @@
 - [第 16 章：Sub-Agent 与 Team — 多智能体协作](part-4/ch16-subagent-team.md)
 - [第 17 章：Slash 命令与 Skill 系统](part-4/ch17-slash-commands.md)
 - [第 18 章：Terminal UI — 终端渲染引擎](part-4/ch18-terminal-ui.md)
+
+# 第五篇 · 实战与展望
+
+- [第 19 章：设计哲学](part-5/ch19-design-philosophy.md)
+- [第 20 章：构建你的 Agent](part-5/ch20-build-your-agent.md)
+- [第 21 章：关键实现挑战](part-5/ch21-implementation-challenges.md)
+- [第 22 章：未来展望](part-5/ch22-future-outlook.md)

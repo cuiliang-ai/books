@@ -6,7 +6,7 @@ Online technical books, built with [mdBook](https://rust-lang.github.io/mdBook/)
 
 | Book | Description | Status |
 |------|-------------|--------|
-| [Claude Code Deep Dive](https://book.cuiliang.ai/claude-code-deep-dive/) | Claude Code v2.1.86 architecture deep dive | In Progress (15/22 chapters) |
+| [Claude Code Deep Dive](https://book.cuiliang.ai/claude-code-deep-dive/) | Claude Code v2.1.86 architecture deep dive | Complete (18 chapters) |
 
 ## Development
 

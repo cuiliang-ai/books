@@ -1,0 +1,18 @@
+[book]
+title = "Advanced Claude Code Deep Dive"
+authors = ["Liang Cui"]
+description = "Claude Code 架构深度解析 — 基于原始 TypeScript 源码的全面剖析"
+language = "zh"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/cuiliang-ai/books"
+edit-url-template = "https://github.com/cuiliang-ai/books/edit/main/advanced-claude-code-deep-dive/{path}"
+default-theme = "light"
+preferred-dark-theme = "coal"
+site-url = "/books/advanced-claude-code-deep-dive/"
+additional-css = ["custom.css"]
