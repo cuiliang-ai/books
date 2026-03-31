@@ -52,6 +52,8 @@ Claude Code 的 Agentic Loop 建立在四个核心理念之上：
 
 ### 完整执行流程全景图
 
+![Agentic Loop 完整执行流程全景图](q__src_books_claude-code-deep-dive_src_part-2_agentic-loop-overview.png)
+
 ```
                         ┌─────────────────────────────────────────────┐
                         │            av() (agentExecute)              │
