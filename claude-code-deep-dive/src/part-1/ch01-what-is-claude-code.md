@@ -68,13 +68,13 @@ flowchart LR
 
 ## 1.2 与其他 AI 编程工具的区别
 
-市面上的 AI 编程工具可以按交互模式分为三代：
+市面上的 AI 编程工具可以按交互模式分为三种类型：
 
-### 三代 AI 编程工具
+### 三种交互模式
 
 ```mermaid
 flowchart LR
-    subgraph G1["第一代：补全式\n(GitHub Copilot)"]
+    subgraph G1["补全式\n(GitHub Copilot)"]
         direction TB
         A1["IDE 编辑器"]
         A2["def foo():\n  ret█ ← AI: 'urn x'"]
@@ -82,7 +82,7 @@ flowchart LR
         A1 --- A2 --- A3
     end
 
-    subgraph G2["第二代：IDE 嵌入式\n(Cursor, Windsurf)"]
+    subgraph G2["IDE 嵌入式\n(Cursor, Windsurf)"]
         direction TB
         B1["IDE 编辑器 + Chat Panel"]
         B2["'帮我重写这个函数'\n↓ AI 生成 diff\n人审核 apply"]
@@ -90,7 +90,7 @@ flowchart LR
         B1 --- B2 --- B3
     end
 
-    subgraph G3["第三代：终端 Agent 式\n(Claude Code)"]
+    subgraph G3["终端 Agent 式\n(Claude Code)"]
         direction TB
         C1["终端"]
         C2["'重构这个模块'\nAgent 自主执行\n读→改→测→修→完"]
@@ -116,7 +116,7 @@ flowchart LR
 
 ### 本质区别：控制权的转移
 
-这三代工具的核心差异不在技术细节，而在**控制权的分配**：
+这三种模式的核心差异不在技术细节，而在**控制权的分配**：
 
 - **Copilot**：人写代码，AI 猜你要写什么 — 控制权完全在人
 - **Cursor**：人说要改什么，AI 提供 diff，人审核后应用 — 控制权大部分在人
