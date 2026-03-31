@@ -1,0 +1,17 @@
+[book]
+title = "Claude Code Deep Dive"
+authors = ["Liang Cui"]
+description = "Claude Code v2.1.86 架构深度解析 — 从反编译到工程实践"
+language = "zh"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/cuiliang-ai/books"
+edit-url-template = "https://github.com/cuiliang-ai/books/edit/main/claude-code-deep-dive/{path}"
+default-theme = "navy"
+preferred-dark-theme = "coal"
+site-url = "/claude-code-deep-dive/"
