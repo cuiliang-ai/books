@@ -41,3 +41,7 @@ Output is generated in the `book/` directory.
 ## License
 
 All rights reserved.
+
+## Disclaimer
+
+The *Claude Code Deep Dive* book is for **educational and research purposes only**. Claude Code is a product of [Anthropic](https://www.anthropic.com/); all related source code and intellectual property belong to Anthropic. This book does not redistribute the original source code — only short excerpts are quoted to illustrate architectural concepts. Readers should comply with all applicable software license agreements and laws.
