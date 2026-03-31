@@ -1,0 +1,16 @@
+[book]
+title = "Codex CLI Deep Dive"
+authors = ["Liang Cui"]
+description = "OpenAI Codex CLI 源码深度解析 — Rust + TypeScript 混合架构"
+language = "zh"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "coal"
+site-url = "/codex-deep-dive/"
+additional-css = ["custom.css"]
