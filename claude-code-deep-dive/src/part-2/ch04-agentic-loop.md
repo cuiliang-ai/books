@@ -436,7 +436,12 @@ xi1() (mainLoop)
   └─→ 每个 content block 完成时 yield 给 xi1()
 ```
 
-`TH8()` (vcrWrapper) 是一个有趣的中间层 — 在开发/测试时，它可以将 API 响应录制到文件，之后回放，不需要真正调用 API。这是依赖注入模式带来的可测试性收益。
+`TH8()` (vcrWrapper) 的命名来自 Ruby 测试社区的 [VCR](https://github.com/vcr/vcr) 库（Video Cassette Recorder）。它的工作原理类似录像机：
+
+- **录制模式**：首次运行测试时，`TH8()` 让请求正常通过到 Claude API，同时通过 `bc_()` (vcrRecord) 将完整的 SSE 响应序列化保存到本地文件（"磁带"）
+- **回放模式**：后续运行测试时，`TH8()` 直接从文件读取之前录制的响应返回，完全跳过网络请求
+
+这意味着开发者只需联网录制一次 API 交互，之后所有测试都可以离线运行、零延迟、零成本。这种模式之所以能实现，是因为 `callModel` 通过依赖注入传入主循环 — `TH8()` 作为中间层可以透明地插入录制/回放逻辑，主循环代码完全不需要感知。
 
 ### 请求参数组装 — `OH()` (buildRequestParams)
 
