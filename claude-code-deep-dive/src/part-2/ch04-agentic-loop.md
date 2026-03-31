@@ -266,7 +266,7 @@ let Y = {
 
 ### while(true) + 状态覆盖 vs 递归调用
 
-一个常见的 Agentic Loop 实现方式是递归：
+一个直觉上更简洁的实现方式是递归：
 
 ```javascript
 // 递归方式（CC 没有采用）
