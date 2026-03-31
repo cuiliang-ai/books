@@ -136,7 +136,7 @@ async function* av({
     availableTools: D,     // 可用工具列表
     allowedTools: j,       // 已授权工具列表
     // ... 更多参数
-}) {
+})
 ```
 
 这个函数接收十几个参数，覆盖了 Agent 执行的所有配置维度。核心参数可以分为三组：
