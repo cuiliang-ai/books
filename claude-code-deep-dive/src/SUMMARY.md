@@ -6,9 +6,9 @@
 
 # 第一篇 · 入门
 
-- [第 1 章：什么是 Claude Code]()
-- [第 2 章：安装与打包]()
-- [第 3 章：架构总览]()
+- [第 1 章：什么是 Claude Code](part-1/ch01-what-is-claude-code.md)
+- [第 2 章：安装与打包](part-1/ch02-installation-packaging.md)
+- [第 3 章：架构总览](part-1/ch03-architecture-overview.md)
 
 # 第二篇 · 核心架构
 
