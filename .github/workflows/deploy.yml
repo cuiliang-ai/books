@@ -40,8 +40,8 @@ jobs:
       - name: Copy index page
         run: cp index.html output/
 
-      - name: Copy CNAME
-        run: cp CNAME output/
+      - name: Copy CNAME (if exists)
+        run: test -f CNAME && cp CNAME output/ || echo "No CNAME file, skipping"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
