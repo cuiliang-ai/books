@@ -33,7 +33,7 @@ jobs:
           for dir in */; do
             if [ -f "${dir}book.toml" ]; then
               echo "Building ${dir}..."
-              mdbook build "${dir}" --dest-dir "../output/${dir%/}"
+              mdbook build "${dir}" --dest-dir "$(pwd)/output/${dir%/}"
             fi
           done
 
