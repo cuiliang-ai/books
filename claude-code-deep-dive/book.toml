@@ -9,6 +9,9 @@ src = "src"
 build-dir = "book"
 create-missing = false
 
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
 [output.html]
 git-repository-url = "https://github.com/cuiliang-ai/books"
 edit-url-template = "https://github.com/cuiliang-ai/books/edit/main/claude-code-deep-dive/{path}"
@@ -16,3 +19,4 @@ default-theme = "light"
 preferred-dark-theme = "coal"
 site-url = "/books/claude-code-deep-dive/"
 additional-css = ["custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]

@@ -38,32 +38,26 @@
 
 当你执行 `claude` 命令时，发生了什么？
 
-```
-Terminal                                Claude Code Process
-┌──────────────────┐                   ┌─────────────────────────────────────┐
-│  $ claude        │                   │                                     │
-│                  │  user input        │  ┌─────────────┐                    │
-│  > Refactor      │ ──────────────────▶│  │ Agentic Loop│  core loop engine  │
-│    UserService   │                   │  │  (Ch.4)      │                    │
-│                  │                   │  └──────┬──────┘                    │
-│                  │                   │         │                            │
-│                  │                   │  ┌──────▼──────┐                    │
-│  Searching...    │ ◀────────────────  │  │ Tool System │  40+ tools         │
-│                  │  streaming output  │  │  (Ch.8)     │                    │
-│  Reading file... │ ◀────────────────  │  └──────┬──────┘                    │
-│                  │                   │         │                            │
-│  Editing file... │ ◀────────────────  │  ┌──────▼──────┐                    │
-│                  │                   │  │  Sandbox    │  permission guard   │
-│  Running tests.. │ ◀────────────────  │  │  (Ch.14)   │                    │
-│                  │                   │  └─────────────┘                    │
-│  Done            │ ◀────────────────  │                                     │
-└──────────────────┘                   └─────────────────────────────────────┘
-                                               │
-                                        ┌──────▼──────┐
-                                        │ Anthropic   │
-                                        │ API Server  │
-                                        │ (Claude)    │
-                                        └─────────────┘
+```mermaid
+flowchart LR
+    subgraph Terminal
+        A["$ claude\n> Refactor UserService"]
+    end
+
+    subgraph CC["Claude Code Process"]
+        B["Agentic Loop\n(Ch.4)"]
+        C["Tool System\n40+ tools (Ch.8)"]
+        D["Sandbox\npermission guard (Ch.14)"]
+        B --> C --> D
+    end
+
+    subgraph API["Anthropic API"]
+        E["Claude Model"]
+    end
+
+    A -- "user input" --> B
+    D -. "streaming output\nSearching...\nReading file...\nEditing file...\nRunning tests..\nDone" .-> A
+    CC <--> API
 ```
 
 整个过程中，Claude Code 自主完成了：搜索代码 → 读取文件 → 理解结构 → 编辑代码 → 运行测试 → 确认结果。这个**"自主循环直到完成"**的能力，就是 Agentic 的核心含义。
@@ -78,23 +72,31 @@ Terminal                                Claude Code Process
 
 ### 三代 AI 编程工具
 
-```
-第一代：补全式                第二代：IDE 嵌入式             第三代：终端 Agent 式
-(GitHub Copilot)             (Cursor, Windsurf)           (Claude Code)
+```mermaid
+flowchart LR
+    subgraph G1["第一代：补全式\n(GitHub Copilot)"]
+        direction TB
+        A1["IDE 编辑器"]
+        A2["def foo():\n  ret█ ← AI: 'urn x'"]
+        A3["人在写，AI 在补"]
+        A1 --- A2 --- A3
+    end
 
-┌────────────────┐           ┌────────────────┐           ┌────────────────┐
-│   IDE 编辑器    │           │   IDE 编辑器    │           │   终端         │
-│                │           │                │           │                │
-│  def foo():    │           │  [Chat Panel]  │           │  > "重构这个    │
-│    ret█        │           │  "帮我重写这个  │           │     模块"      │
-│       ↑        │           │   函数"        │           │                │
-│   AI: "urn x"  │           │       ↓        │           │  Agent 自主执行 │
-│                │           │  AI 生成 diff  │           │  读→改→测→修→完 │
-│  人在写        │           │  人审核 apply  │           │                │
-│  AI 在补        │           │                │           │  人说目标       │
-│                │           │  人在驱动      │           │  Agent 在做    │
-│                │           │  AI 在编辑区操作│           │                │
-└────────────────┘           └────────────────┘           └────────────────┘
+    subgraph G2["第二代：IDE 嵌入式\n(Cursor, Windsurf)"]
+        direction TB
+        B1["IDE 编辑器 + Chat Panel"]
+        B2["'帮我重写这个函数'\n↓ AI 生成 diff\n人审核 apply"]
+        B3["人在驱动，AI 在编辑区操作"]
+        B1 --- B2 --- B3
+    end
+
+    subgraph G3["第三代：终端 Agent 式\n(Claude Code)"]
+        direction TB
+        C1["终端"]
+        C2["'重构这个模块'\nAgent 自主执行\n读→改→测→修→完"]
+        C3["人说目标，Agent 在做"]
+        C1 --- C2 --- C3
+    end
 ```
 
 ### 详细对比
@@ -128,34 +130,39 @@ Terminal                                Claude Code Process
 
 Claude Code 是一个复杂的系统。在深入源码之前，先建立一个能力全景图：
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Claude Code v2.1.86                        │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │ Agentic Loop │  │ System Prompt│  │ Context Management   │  │
-│  │  持续推理引擎 │  │  行为指令系统 │  │  上下文窗口管理       │  │
-│  │  (第 4 章)    │  │  (第 6 章)    │  │  (第 7 章)           │  │
-│  └──────┬───────┘  └──────────────┘  └──────────────────────┘  │
-│         │                                                       │
-│  ┌──────▼──────────────────────────────────────────────────┐   │
-│  │                    工具系统 (第 8 章)                     │   │
-│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌───────┐ │   │
-│  │  │  Bash  │ │File I/O│ │  Git   │ │ Search │ │  MCP  │ │   │
-│  │  │(第 9章)│ │(第10章)│ │(第11章)│ │ (内置) │ │(第12章)│ │   │
-│  │  └────────┘ └────────┘ └────────┘ └────────┘ └───────┘ │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │ 配置与权限    │  │  安全沙箱    │  │  多智能体协作         │  │
-│  │  (第 13 章)   │  │  (第 14 章)  │  │  (第 16 章)          │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │ Hooks 系统   │  │  Slash/Skill │  │  Terminal UI         │  │
-│  │  (第 15 章)   │  │  (第 17 章)  │  │  (第 18 章)          │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph CC["Claude Code v2.1.86"]
+        direction TB
+
+        subgraph Core["核心引擎"]
+            A["Agentic Loop\n持续推理引擎 (Ch.4)"]
+            B["System Prompt\n行为指令系统 (Ch.6)"]
+            C["Context Management\n上下文窗口管理 (Ch.7)"]
+        end
+
+        subgraph Tools["工具系统 (Ch.8)"]
+            T1["Bash (Ch.9)"]
+            T2["File I/O (Ch.10)"]
+            T3["Git (Ch.11)"]
+            T4["Search"]
+            T5["MCP (Ch.12)"]
+        end
+
+        subgraph Security["安全与管控"]
+            S1["配置与权限 (Ch.13)"]
+            S2["安全沙箱 (Ch.14)"]
+            S3["多智能体协作 (Ch.16)"]
+        end
+
+        subgraph Extension["扩展与界面"]
+            E1["Hooks 系统 (Ch.15)"]
+            E2["Slash/Skill (Ch.17)"]
+            E3["Terminal UI (Ch.18)"]
+        end
+
+        Core --> Tools --> Security --> Extension
+    end
 ```
 
 ### 逐一概览
