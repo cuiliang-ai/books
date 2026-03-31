@@ -264,29 +264,11 @@ let Y = {
 | `autoCompactTracking` | object | 追踪上下文大小变化，决定何时 compact |
 | `transition` | object | 记录进入当前状态的原因（调试用） |
 
-### while(true) + 状态覆盖 vs 递归调用
+### while(true) + 状态覆盖
 
-一个直觉上更简洁的实现方式是递归：
-
-```javascript
-// 递归方式（CC 没有采用）
-async function loop(state) {
-    const result = await callModel(state);
-    if (result.done) return result;
-    const toolResult = await executeTool(result);
-    return loop({ ...state, messages: [...state.messages, result, toolResult] });
-}
-```
-
-递归简洁，但有两个严重问题：
-
-1. **栈溢出** — Agent 可能运行数百轮，Node.js 的默认调用栈约 10K 帧
-2. **无法 continue** — 递归调用后，无法从循环的"中间位置"重新进入
-
-CC 选择了 `while(true)` + 状态覆盖：
+CC 的主循环采用 `while(true)` 而非递归 — 递归虽然写法简洁，但 Agent 可能运行数百轮，存在栈溢出风险，且无法从循环中间位置通过 `continue` 重新进入。
 
 ```javascript
-// CC 的实际方式
 while (true) {
     // ... 6 个 Phase ...
 
