@@ -1122,4 +1122,708 @@ Session Memory 的 forked agent 与主循环完全隔离：
 - Gate 检查使用缓存值而非阻塞
 - Session Memory 不可用时回退到传统 compact
 
-这套 Memory 系统将 Claude Code 从一个"无状态的 LLM 对话"提升为一个"有记忆的 Agent"——它能记住用户的偏好、项目的约定、工作的进展，并在需要时把这些记忆注入到 Agent 的 context 中。
+---
+
+## 8.11 Auto Memory：跨会话的持久记忆目录
+
+前面介绍的 CLAUDE.md 是**人工编写**的指令文件，Session Memory 是**单次会话内**的自动笔记。但有一类知识既不适合让用户手写，又需要跨会话持久化——比如用户的角色偏好、项目的非显式约定、失败教训等。这就是 Auto Memory（`memdir/`）子系统的职责。
+
+### 8.11.1 记忆目录结构
+
+Auto Memory 以文件目录的形式组织记忆，每条记忆是一个独立的 Markdown 文件：
+
+```
+~/.claude/projects/<sanitized-git-root>/memory/
+├── MEMORY.md                 ← 索引入口（< 200 行，< 25KB）
+├── user_role.md              ← topic 文件：用户是数据科学家
+├── testing_patterns.md       ← topic 文件：项目测试约定
+├── api_design_feedback.md    ← topic 文件：API 设计偏好
+├── logs/                     ← KAIROS 模式的 daily logs
+│   └── 2026/03/
+│       └── 2026-03-31.md
+└── .consolidate-lock         ← Dream 锁文件
+```
+
+路径解析逻辑在 `memdir/paths.ts` 中，有一条精心设计的优先级链：
+
+```typescript
+// src/memdir/paths.ts:223-235
+export const getAutoMemPath = memoize((): string => {
+  // 1. CLAUDE_COWORK_MEMORY_PATH_OVERRIDE（SDK/Cowork 全路径覆盖）
+  // 2. autoMemoryDirectory（settings.json 配置，支持 ~/）
+  // 3. 默认：~/.claude/projects/<sanitized-git-root>/memory/
+  const override = getAutoMemPathOverride() ?? getAutoMemPathSetting()
+  if (override) return override
+
+  const projectsDir = join(getMemoryBaseDir(), 'projects')
+  return (
+    join(projectsDir, sanitizePath(getAutoMemBase()), AUTO_MEM_DIRNAME) + sep
+  ).normalize('NFC')
+})
+```
+
+关键安全设计：`getAutoMemPathSetting()` 故意**排除 projectSettings**（即 `.claude/settings.json`）——如果允许仓库代码设置记忆路径，恶意仓库就可以把记忆目录指向 `~/.ssh` 并通过 filesystem 的写入豁免获得敏感目录的写权限。这是一个典型的"最小信任"设计：
+
+```typescript
+// src/memdir/paths.ts:178-186
+function getAutoMemPathSetting(): string | undefined {
+  // SECURITY: projectSettings 被排除 — 恶意仓库不能设置 autoMemoryDirectory
+  const dir =
+    getSettingsForSource('policySettings')?.autoMemoryDirectory ??
+    getSettingsForSource('flagSettings')?.autoMemoryDirectory ??
+    getSettingsForSource('localSettings')?.autoMemoryDirectory ??
+    getSettingsForSource('userSettings')?.autoMemoryDirectory
+  return validateMemoryPath(dir, true)
+}
+```
+
+路径验证同样严格——拒绝相对路径、根路径、UNC 路径、null byte 注入，并且 worktree 共享同一个 canonical git root 的记忆目录。
+
+### 8.11.2 记忆类型分类学
+
+Auto Memory 定义了四种记忆类型，核心原则是**只存储不可从项目当前状态推导的信息**：
+
+```typescript
+// src/memdir/memoryTypes.ts:14-19
+export const MEMORY_TYPES = [
+  'user',       // 用户角色、偏好、知识水平
+  'feedback',   // 用户对工作方式的反馈（纠正 + 认可）
+  'project',    // 项目动态：谁在做什么、为什么、截止日期
+  'reference',  // 外部系统指针：Linear 项目、Grafana 面板
+] as const
+```
+
+每种类型都有精确的保存和使用指导。以 `feedback` 类型为例——这是最精巧的设计：
+
+```xml
+<type>
+  <name>feedback</name>
+  <description>
+    记录用户对工作方式的指导——既包括要避免的，也包括要保持的。
+    从失败和成功中记录：如果只保存纠正，你会避免过去的错误，
+    但会偏离用户已经验证的方法，并可能变得过度谨慎。
+  </description>
+  <when_to_save>
+    任何时候用户纠正你的方法（"不要那样"、"别"、"停止做 X"）
+    或确认一个非显而易见的方法有效（"对、就这样"、"完美"）。
+    纠正容易注意到；确认更安静——要留意它们。
+  </when_to_save>
+  <body_structure>
+    先写规则本身，然后 **Why:** 行（原因），
+    然后 **How to apply:** 行（在何时何处应用）。
+    知道"为什么"能让你判断边界情况。
+  </body_structure>
+</type>
+```
+
+**"记录成功而非只记录失败"**是一个深思熟虑的设计决策。如果 Agent 只记住被纠正的事情，它会逐渐变得过度保守——避免了错误但也避免了所有大胆尝试。记住成功让 Agent 保持平衡。
+
+### 8.11.3 什么不应该保存
+
+同样重要的是**排除规则**——防止记忆系统被噪声淹没：
+
+```typescript
+// src/memdir/memoryTypes.ts:183-195
+export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
+  '## What NOT to save in memory',
+  '',
+  '- Code patterns, conventions, architecture, file paths, or project structure' +
+    ' — these can be derived by reading the current project state.',
+  '- Git history, recent changes, or who-changed-what — git log / git blame are authoritative.',
+  '- Debugging solutions or fix recipes — the fix is in the code.',
+  '- Anything already documented in CLAUDE.md files.',
+  '- Ephemeral task details: in-progress work, temporary state.',
+  '',
+  // 关键：即使用户明确要求保存也拒绝
+  'These exclusions apply even when the user explicitly asks you to save.',
+]
+```
+
+最后一条规则尤为大胆：**即使用户要求保存 PR 列表或活动摘要，也不保存**——而是反问"这里面哪些是出人意料或不显而易见的？"。这是通过 eval 验证的设计（注释引用了 `memory-prompt-iteration case 3, 0/2 → 3/3`）。
+
+### 8.11.4 MEMORY.md 索引与截断
+
+`MEMORY.md` 不是记忆本身，而是一个**索引**——每条记忆对应一行，格式为 `- [Title](file.md) — one-line hook`。它被注入到每次会话的 system prompt 中，因此有严格的大小限制：
+
+```typescript
+// src/memdir/memdir.ts:34-38
+export const ENTRYPOINT_NAME = 'MEMORY.md'
+export const MAX_ENTRYPOINT_LINES = 200    // 行数限制
+export const MAX_ENTRYPOINT_BYTES = 25_000 // 字节限制（~25KB）
+```
+
+截断逻辑先按行截断（自然边界），再按字节截断（在最后一个换行符处切割，不会切断半行）：
+
+```typescript
+// src/memdir/memdir.ts:57-102
+export function truncateEntrypointContent(raw: string): EntrypointTruncation {
+  const contentLines = trimmed.split('\n')
+  const wasLineTruncated = lineCount > MAX_ENTRYPOINT_LINES
+  const wasByteTruncated = byteCount > MAX_ENTRYPOINT_BYTES
+
+  // 先按行截断
+  let truncated = wasLineTruncated
+    ? contentLines.slice(0, MAX_ENTRYPOINT_LINES).join('\n')
+    : trimmed
+
+  // 再按字节截断（在行边界处）
+  if (truncated.length > MAX_ENTRYPOINT_BYTES) {
+    const cutAt = truncated.lastIndexOf('\n', MAX_ENTRYPOINT_BYTES)
+    truncated = truncated.slice(0, cutAt > 0 ? cutAt : MAX_ENTRYPOINT_BYTES)
+  }
+
+  // 附加警告消息
+  return {
+    content: truncated + `\n\n> WARNING: ${ENTRYPOINT_NAME} is ${reason}...`,
+    // ...
+  }
+}
+```
+
+### 8.11.5 记忆的回忆与信任
+
+从记忆中回忆信息时，系统内置了一套"怀疑机制"——不盲目信任旧记忆：
+
+```typescript
+// src/memdir/memoryTypes.ts:240-256
+export const TRUSTING_RECALL_SECTION: readonly string[] = [
+  '## Before recommending from memory',
+  '',
+  'A memory that names a specific function, file, or flag is a claim that ' +
+  'it existed *when the memory was written*. It may have been renamed, ' +
+  'removed, or never merged. Before recommending it:',
+  '',
+  '- If the memory names a file path: check the file exists.',
+  '- If the memory names a function or flag: grep for it.',
+  '- If the user is about to act on your recommendation, verify first.',
+  '',
+  '"The memory says X exists" is not the same as "X exists now."',
+]
+```
+
+这段 prompt 的注释记录了 eval 验证过程：标题从抽象的 "Trusting what you recall" 改为行动导向的 "Before recommending from memory"，eval 结果从 0/3 变为 3/3——**措辞对 LLM 行为的影响远超直觉**。
+
+---
+
+## 8.12 extractMemories：每轮结束的记忆提取 Agent
+
+如果说 Auto Memory 是记忆的"仓库"，那 `extractMemories` 就是"搬运工"——它在每轮对话结束时自动运行，从对话内容中提取值得长期保存的信息。
+
+### 8.12.1 架构位置
+
+```
+用户提问 → 主 Agent 回答 → stop hooks 触发
+                               │
+                               ├─ promptSuggestion（输入建议）
+                               ├─ confidenceRating（置信度评估）
+                               ├─ extractMemories ←── 这里
+                               └─ autoDream（记忆整理）
+```
+
+`extractMemories` 在 `stopHooks.ts` 的 `handleStopHooks()` 中被调用，是一个 fire-and-forget 的异步操作。
+
+### 8.12.2 闭包作用域状态模式
+
+`extractMemories.ts` 使用了一个独特的**闭包作用域状态**模式——所有可变状态都封装在 `initExtractMemories()` 创建的闭包中：
+
+```typescript
+// src/services/extractMemories/extractMemories.ts:296-587 (结构)
+export function initExtractMemories(): void {
+  // --- 闭包作用域的可变状态 ---
+  const inFlightExtractions = new Set<Promise<void>>()
+  let lastMemoryMessageUuid: string | undefined  // 游标：上次处理到哪
+  let hasLoggedGateFailure = false                 // 一次性日志标记
+  let inProgress = false                           // 重叠保护
+  let turnsSinceLastExtraction = 0                 // 轮次节流
+  let pendingContext: { context, appendSystemMessage? } | undefined  // 待处理上下文
+
+  async function runExtraction({ context, appendSystemMessage, isTrailingRun }) {
+    // ... 核心提取逻辑
+  }
+
+  async function executeExtractMemoriesImpl(context, appendSystemMessage?) {
+    // ... 入口逻辑
+  }
+
+  extractor = async (context, appendSystemMessage) => { /* ... */ }
+  drainer = async (timeoutMs) => { /* ... */ }
+}
+```
+
+这个模式的优势：
+1. **测试友好**——每次 `beforeEach` 调用 `initExtractMemories()` 获得全新闭包
+2. **无全局副作用**——状态完全隔离在闭包内
+3. **生命周期清晰**——`init` 时创建，`drain` 时等待完成
+
+### 8.12.3 主 Agent 互斥
+
+一个微妙但关键的设计：主 Agent 的 system prompt 中已经包含了记忆保存指令，它可能在对话中直接写入记忆文件。当这发生时，后台提取 agent 必须跳过，避免重复：
+
+```typescript
+// src/services/extractMemories/extractMemories.ts:121-148
+function hasMemoryWritesSince(
+  messages: Message[], sinceUuid: string | undefined
+): boolean {
+  // 扫描 sinceUuid 之后的 assistant 消息
+  // 检查是否有 Edit/Write tool_use 的目标路径在 auto-memory 目录内
+  for (const message of messages) {
+    if (message.type !== 'assistant') continue
+    for (const block of message.message.content) {
+      const filePath = getWrittenFilePath(block)
+      if (filePath !== undefined && isAutoMemPath(filePath)) {
+        return true  // 主 Agent 已经写了，跳过
+      }
+    }
+  }
+  return false
+}
+```
+
+在 `runExtraction` 中：
+
+```typescript
+if (hasMemoryWritesSince(messages, lastMemoryMessageUuid)) {
+  // 主 Agent 已写入记忆，推进游标但不执行提取
+  lastMemoryMessageUuid = messages.at(-1)?.uuid
+  return
+}
+```
+
+这实现了主 Agent 和后台 Agent 的**互斥**：谁先写谁负责，不会重复保存。
+
+### 8.12.4 合并与尾部追踪
+
+当提取正在进行时收到新的触发请求，系统使用"暂存 + 尾部追踪"模式：
+
+```typescript
+// 如果正在运行，暂存最新上下文（覆盖之前暂存的）
+if (inProgress) {
+  pendingContext = { context, appendSystemMessage }
+  return  // 不等待，立即返回
+}
+
+// 在 runExtraction 的 finally 中：
+finally {
+  inProgress = false
+  const trailing = pendingContext
+  pendingContext = undefined
+  if (trailing) {
+    // 运行尾部提取，只处理两次调用之间新增的消息
+    await runExtraction({
+      context: trailing.context,
+      isTrailingRun: true,
+    })
+  }
+}
+```
+
+只保留**最新的**暂存上下文（因为它包含最完整的消息历史），尾部运行的 `newMessageCount` 基于已推进的游标计算，只处理增量。
+
+### 8.12.5 工具权限沙箱
+
+提取 agent 的权限通过 `createAutoMemCanUseTool()` 严格限制：
+
+```typescript
+// src/services/extractMemories/extractMemories.ts:171-222
+export function createAutoMemCanUseTool(memoryDir: string): CanUseToolFn {
+  return async (tool, input) => {
+    // ✅ Read/Grep/Glob：无限制（只读）
+    if ([FILE_READ_TOOL_NAME, GREP_TOOL_NAME, GLOB_TOOL_NAME].includes(tool.name))
+      return { behavior: 'allow' }
+
+    // ✅ Bash：仅只读命令（ls, find, grep, cat, stat, wc, head, tail）
+    if (tool.name === BASH_TOOL_NAME) {
+      if (tool.isReadOnly(parsed.data))
+        return { behavior: 'allow' }
+      return denyAutoMemTool(tool, 'Only read-only shell commands are permitted')
+    }
+
+    // ✅ Edit/Write：仅 memory 目录内的路径
+    if ((tool.name === FILE_EDIT_TOOL_NAME || tool.name === FILE_WRITE_TOOL_NAME)
+        && isAutoMemPath(input.file_path))
+      return { behavior: 'allow' }
+
+    // ❌ 其他所有工具（MCP、Agent、写入 Bash 等）
+    return denyAutoMemTool(tool, '...')
+  }
+}
+```
+
+一个有趣的边界情况：当 REPL 模式启用时（Anthropic 内部默认），原始工具被隐藏，forked agent 通过 REPL 工具间接调用。REPL 的内部 `createToolWrapper` 会对每个实际操作重新检查 `canUseTool`，所以安全约束仍然生效。允许 REPL 的原因是**不能修改工具列表**——工具列表是 prompt cache key 的一部分，修改会破坏缓存共享。
+
+### 8.12.6 Prompt 设计
+
+提取 prompt 的结构经过仔细设计以最小化轮次消耗：
+
+```typescript
+// src/services/extractMemories/prompts.ts:29-44 (要点)
+function opener(newMessageCount: number, existingMemories: string): string {
+  return [
+    `You are now acting as the memory extraction subagent.`,
+    `Analyze the most recent ~${newMessageCount} messages above...`,
+    '',
+    // 明确列出可用工具——避免试探被拒绝的工具浪费轮次
+    `Available tools: Read, Grep, Glob, read-only Bash, and Edit/Write for memory only.`,
+    '',
+    // 高效策略指导——Read 要求先读后改，所以明确两轮策略
+    `You have a limited turn budget. The efficient strategy is:`,
+    `turn 1 — issue all Read calls in parallel;`,
+    `turn 2 — issue all Write/Edit calls in parallel.`,
+    '',
+    // 禁止验证——不要浪费轮次去确认记忆内容
+    `You MUST only use content from the last ~${newMessageCount} messages.`,
+    `Do not waste turns attempting to investigate or verify.`,
+    // 预注入已有记忆清单——避免浪费轮次执行 ls
+  ].join('\n')
+}
+```
+
+`maxTurns: 5` 硬限制防止 agent 陷入"验证兔子洞"——一个良好的提取通常只需要 2-4 轮（读取 → 写入）。
+
+### 8.12.7 完成通知
+
+当记忆成功写入后，系统会在主对话中插入一条系统消息通知用户：
+
+```typescript
+if (memoryPaths.length > 0) {
+  const msg = createMemorySavedMessage(memoryPaths)
+  appendSystemMessage?.(msg)  // "Saved N memories" 通知
+}
+```
+
+索引文件（MEMORY.md）的更新被排除在通知之外——它是机械性的指针更新，用户真正关心的是 topic 文件。
+
+---
+
+## 8.13 AutoDream：后台记忆整理（"做梦"）
+
+AutoDream 是 Claude Code 中最具创意的子系统之一。它的比喻来自人类神经科学：白天学习新知识（extractMemories），夜晚在睡眠中整理、合并、清理记忆（Dream）。
+
+### 8.13.1 为什么需要 Dream
+
+extractMemories 解决了"写入"问题，但随着时间推移会产生新的问题：
+
+1. **记忆碎片化**——多个会话中学到的相关知识分散在不同文件中
+2. **记忆过时**——项目演进后旧记忆不再准确
+3. **记忆膨胀**——MEMORY.md 索引逐渐超出限制
+4. **记忆矛盾**——不同时期写入的记忆互相冲突
+
+Dream 的工作就是定期"清醒地回顾"，执行人类大脑在睡眠中做的事情。
+
+### 8.13.2 三级门控设计
+
+Dream 的触发使用了精心设计的三级门控，**从最便宜的检查到最贵的检查**排列：
+
+```typescript
+// src/services/autoDream/autoDream.ts (门控顺序)
+
+// Gate 0: 前置条件（几乎零成本）
+if (getKairosActive()) return false  // KAIROS 模式用磁盘 skill dream
+if (getIsRemoteMode()) return false
+if (!isAutoMemoryEnabled()) return false
+if (!isAutoDreamEnabled()) return false
+
+// Gate 1: 时间门控 — 1 次 stat 调用
+const lastAt = await readLastConsolidatedAt()  // 读锁文件 mtime
+const hoursSince = (Date.now() - lastAt) / 3_600_000
+if (hoursSince < cfg.minHours) return  // 默认 24 小时
+
+// Gate 1.5: 扫描节流 — 无 I/O
+if (Date.now() - lastSessionScanAt < SESSION_SCAN_INTERVAL_MS) return  // 10 分钟
+
+// Gate 2: 会话数门控 — 目录扫描
+const sessionIds = await listSessionsTouchedSince(lastAt)
+sessionIds = sessionIds.filter(id => id !== currentSession)  // 排除当前会话
+if (sessionIds.length < cfg.minSessions) return  // 默认 5 个会话
+
+// Gate 3: 锁 — 文件写入 + 读取验证
+const priorMtime = await tryAcquireConsolidationLock()
+if (priorMtime === null) return  // 其他进程正在整理
+```
+
+这个设计的巧妙之处在于成本递增：
+
+| 门控 | 成本 | 频率 |
+|------|------|------|
+| Gate 0: 前置条件 | ~0（内存读取） | 每轮 |
+| Gate 1: 时间门控 | 1 次 stat | 每轮 |
+| Gate 1.5: 扫描节流 | 0（时间戳比较） | 时间门控通过后 |
+| Gate 2: 会话扫描 | 目录遍历 + N 次 stat | 每 10 分钟最多 1 次 |
+| Gate 3: 文件锁 | 1 次写入 + 1 次读取 | 会话数满足后 |
+
+大多数轮次在 Gate 1 就会退出（不到 24 小时），成本仅为一次 `stat` 系统调用。
+
+### 8.13.3 锁机制：文件 mtime 即时间戳
+
+`consolidationLock.ts` 实现了一个极简但健壮的分布式锁，核心技巧是**复用锁文件的 mtime 作为 `lastConsolidatedAt` 时间戳**：
+
+```typescript
+// src/services/autoDream/consolidationLock.ts
+
+// 锁文件路径：<memory-dir>/.consolidate-lock
+// 文件内容：持有者的 PID（用于活锁检测）
+// 文件 mtime：上次整理完成的时间
+
+export async function readLastConsolidatedAt(): Promise<number> {
+  try {
+    const s = await stat(lockPath())
+    return s.mtimeMs  // mtime 就是时间戳
+  } catch {
+    return 0  // 文件不存在 = 从未整理过
+  }
+}
+
+export async function tryAcquireConsolidationLock(): Promise<number | null> {
+  // 检查现有锁
+  const [s, raw] = await Promise.all([stat(path), readFile(path, 'utf8')])
+  const mtimeMs = s.mtimeMs
+  const holderPid = parseInt(raw.trim(), 10)
+
+  // 如果锁未过期且持有者 PID 仍在运行 → 锁定中
+  if (Date.now() - mtimeMs < HOLDER_STALE_MS) {  // 1 小时过期
+    if (isProcessRunning(holderPid)) return null
+    // PID 已死 → 回收锁
+  }
+
+  // 获取锁：写入自己的 PID → mtime 变为 now
+  await writeFile(path, String(process.pid))
+
+  // 竞态检测：两个进程同时写 → 最后一个赢
+  const verify = await readFile(path, 'utf8')
+  if (parseInt(verify.trim(), 10) !== process.pid) return null  // 输了
+
+  return mtimeMs ?? 0  // 返回之前的 mtime（用于回滚）
+}
+```
+
+回滚机制同样优雅：
+
+```typescript
+export async function rollbackConsolidationLock(priorMtime: number): Promise<void> {
+  if (priorMtime === 0) {
+    await unlink(path)  // 恢复到"从未整理"状态
+    return
+  }
+  await writeFile(path, '')     // 清空 PID（避免自己的 PID 被误认为仍在持有）
+  await utimes(path, t, t)      // 用 utimes 恢复 mtime
+}
+```
+
+**为什么不用 advisory lock（flock）？** 因为 `flock` 在进程退出时自动释放，无法保留 `lastConsolidatedAt` 信息。文件 mtime 方案用一个文件同时承载两个语义——"谁在持有锁"和"上次完成时间"。
+
+### 8.13.4 Dream 的四阶段 Prompt
+
+Dream prompt 是一个精心编排的四阶段工作流：
+
+```typescript
+// src/services/autoDream/consolidationPrompt.ts:15-64
+export function buildConsolidationPrompt(
+  memoryRoot: string, transcriptDir: string, extra: string
+): string {
+  return `# Dream: Memory Consolidation
+
+You are performing a dream — a reflective pass over your memory files.
+
+## Phase 1 — Orient
+- ls 记忆目录
+- 读 MEMORY.md 了解当前索引
+- 浏览已有 topic 文件（避免创建重复）
+
+## Phase 2 — Gather recent signal
+- 优先看 daily logs（logs/YYYY/MM/YYYY-MM-DD.md）
+- 检查与当前代码矛盾的旧记忆
+- 必要时窄范围 grep JSONL transcript（不要通读）
+
+## Phase 3 — Consolidate
+- 合并新信号到已有 topic 文件（不是创建新的）
+- 将相对日期转为绝对日期（"昨天" → "2026-03-30"）
+- 删除已被推翻的旧事实
+
+## Phase 4 — Prune and index
+- MEMORY.md < 200 行 且 < 25KB
+- 每条索引一行，< 150 字符
+- 删除过时指针，精简冗长条目
+- 解决矛盾——两个文件不一致时修正错误的那个
+
+${extra}`  // extra 包含 tool 约束和会话列表
+}
+```
+
+注意 Phase 2 的 transcript 访问指导：**"Don't exhaustively read transcripts. Look only for things you already suspect matter."** 这防止 Dream agent 浪费大量 token 通读完整的 JSONL 日志。
+
+### 8.13.5 工具约束与安全
+
+Dream agent 的工具约束通过 `extra` 参数注入（而不是放在共享 prompt 中），因为手动 `/dream` 命令在主循环中运行，有正常的完整权限：
+
+```typescript
+const extra = `
+**Tool constraints for this run:** Bash is restricted to read-only commands
+(ls, find, grep, cat, stat, wc, head, tail, and similar). Anything that writes,
+redirects to a file, or modifies state will be denied.
+
+Sessions since last consolidation (${sessionIds.length}):
+${sessionIds.map(id => `- ${id}`).join('\n')}`
+```
+
+权限复用 `extractMemories` 的 `createAutoMemCanUseTool()`——读操作无限制，写操作仅限 memory 目录。
+
+### 8.13.6 DreamTask：后台任务 UI
+
+Dream 通过 `DreamTask.ts` 在终端底部状态条中可视化：
+
+```typescript
+// src/tasks/DreamTask/DreamTask.ts
+export type DreamTaskState = TaskStateBase & {
+  type: 'dream'
+  phase: DreamPhase           // 'starting' | 'updating'
+  sessionsReviewing: number   // 正在审查几个会话
+  filesTouched: string[]      // 修改了哪些文件（不完整——只捕获 Edit/Write）
+  turns: DreamTurn[]          // agent 文本响应 + 工具调用计数
+  abortController?: AbortController
+  priorMtime: number          // 用于 kill 时回滚锁
+}
+```
+
+Phase 从 `starting` 切换到 `updating` 的时机很简洁——第一次观察到 Edit/Write tool_use 时自动切换：
+
+```typescript
+export function addDreamTurn(taskId, turn, touchedPaths, setAppState): void {
+  updateTaskState<DreamTaskState>(taskId, setAppState, task => ({
+    ...task,
+    phase: newTouched.length > 0 ? 'updating' : task.phase,
+    filesTouched: newTouched.length > 0
+      ? [...task.filesTouched, ...newTouched]
+      : task.filesTouched,
+    turns: task.turns.slice(-(MAX_TURNS - 1)).concat(turn),  // 保留最近 30 轮
+  }))
+}
+```
+
+用户可以通过 `Shift+Down` 打开后台任务面板查看 Dream 进展，也可以 kill 终止。Kill 操作会回滚锁的 mtime——确保下次会话仍会重试：
+
+```typescript
+export const DreamTask: Task = {
+  async kill(taskId, setAppState) {
+    let priorMtime: number | undefined
+    updateTaskState<DreamTaskState>(taskId, setAppState, task => {
+      task.abortController?.abort()
+      priorMtime = task.priorMtime
+      return { ...task, status: 'killed', endTime: Date.now() }
+    })
+    if (priorMtime !== undefined) {
+      await rollbackConsolidationLock(priorMtime)  // 回滚 → 下次重试
+    }
+  },
+}
+```
+
+---
+
+## 8.14 三层记忆系统的协作全景
+
+回顾全章，Claude Code 的完整记忆系统可以理解为三个协作层次，对应人类认知的三个阶段：
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Claude Code 记忆系统全景                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─────────────────┐   ┌──────────────────┐   ┌─────────────────┐  │
+│  │   CLAUDE.md     │   │  Session Memory  │   │   Auto Memory   │  │
+│  │   静态指令文件    │   │  会话内自动笔记    │   │  跨会话持久记忆   │  │
+│  ├─────────────────┤   ├──────────────────┤   ├─────────────────┤  │
+│  │ 类比：教科书/手册 │   │ 类比：工作日志     │   │ 类比：长期记忆    │  │
+│  │ 作者：人类       │   │ 作者：后台 Agent   │   │ 作者：后台 Agent  │  │
+│  │ 生命周期：永久    │   │ 生命周期：单次会话  │   │ 生命周期：跨会话   │  │
+│  │ 大小：≤40K 字符  │   │ 大小：≤12K tokens │   │ 索引≤200行       │  │
+│  │ 注入方式：系统提示 │   │ 注入方式：Compact时│   │ 注入方式：系统提示 │  │
+│  │ 触发：启动加载    │   │ 触发：post-sampling│   │ 触发：stop hooks │  │
+│  └────────┬────────┘   └────────┬─────────┘   └────────┬────────┘  │
+│           │                     │                       │           │
+│           └─────────────────────┼───────────────────────┘           │
+│                                 │                                   │
+│                     ┌───────────┴───────────┐                       │
+│                     │     AutoDream         │                       │
+│                     │   "做梦"记忆整理       │                       │
+│                     │  类比：睡眠中的记忆整合 │                       │
+│                     │  触发：24h + 5个会话   │                       │
+│                     │  工作：合并/清理/修剪   │                       │
+│                     └───────────────────────┘                       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.14.1 数据流
+
+```
+用户对话
+  ├─→ Session Memory（post-sampling hook，每 5K tokens + 3 次工具调用）
+  │     └─→ 更新 notes.md（结构化笔记，用于 compact 替代摘要）
+  │
+  ├─→ extractMemories（stop hook，每轮结束）
+  │     └─→ 写入 memory/*.md（持久记忆文件 + MEMORY.md 索引）
+  │
+  └─→ autoDream（stop hook，每 24 小时 + 5 个会话）
+        └─→ 整理 memory/*.md（合并/清理/修剪索引）
+```
+
+### 8.14.2 互斥与协调
+
+三个后台 Agent 之间有精密的协调机制：
+
+| 协调点 | 机制 |
+|--------|------|
+| Session Memory vs 主循环 | `sequential()` 串行化 + 只在主 REPL 线程运行 |
+| extractMemories vs 主 Agent | `hasMemoryWritesSince()` 互斥检测 |
+| extractMemories vs 自身 | `inProgress` 标志 + `pendingContext` 合并 |
+| autoDream vs 其他进程 | 文件锁（PID + mtime） |
+| autoDream vs extractMemories | 不同触发条件（stop hook vs post-sampling hook） |
+
+---
+
+## 8.15 设计启示：构建你自己的 Agent 记忆系统
+
+Claude Code 的记忆系统为 Agent 记忆设计提供了丰富的可借鉴模式。
+
+### 8.15.1 "学习-做梦"双循环
+
+这是整个系统最核心的架构创新。传统做法是在对话中直接保存记忆，但 Claude Code 将其分为两个独立的循环：
+
+- **学习循环**（extractMemories）：每轮结束时增量提取新记忆
+- **整理循环**（autoDream）：定期回顾、合并、清理已有记忆
+
+这对应人类认知科学中的"编码-巩固"模型——新信息先快速存储（海马体），然后在睡眠中整合到长期记忆（皮层）。对 Agent 系统的启示是：**不要试图在写入时就完美组织记忆——先快速存储，再异步整理。**
+
+### 8.15.2 门控成本分层
+
+AutoDream 的三级门控设计是一个通用模式：将检查按成本排序，让最便宜的检查先执行以快速短路。对于任何"可能需要做但通常不需要做"的后台任务，这个模式都适用：
+
+```
+检查缓存标志 → 检查时间戳 → 扫描目录 → 获取锁 → 执行任务
+   O(1)          O(1)         O(n)        O(1)      O(expensive)
+```
+
+大多数调用在第一步就返回，只有极少数到达最后一步。
+
+### 8.15.3 记忆分类学
+
+四种类型（user/feedback/project/reference）的分类不是随意的。它基于一个清晰的原则：**只保存不可从项目当前状态推导的信息**。代码模式可以 grep，git 历史可以 `log`，但"用户是新手"和"不要 mock 数据库"这类知识无法从代码推导。
+
+设计你自己的记忆分类时，问自己：**这条信息能通过工具从当前状态获取吗？** 如果能，不要保存——保存会产生过时风险。
+
+### 8.15.4 "记住成功"原则
+
+`feedback` 类型的 prompt 明确要求**同时记录纠正和确认**。这解决了一个微妙的偏差：如果只记录错误，Agent 会学会避免所有大胆尝试。这是一个可迁移到任何学习系统的原则——强化学习中的 reward 不能只有 negative signal。
+
+### 8.15.5 锁文件复用 mtime
+
+`consolidationLock.ts` 的设计展示了系统编程中"一个机制服务多个语义"的思维方式。用 `flock` 需要额外的文件或数据库记录时间戳；用 mtime 一个文件就解决了两个问题。这种设计适用于任何需要"上次执行时间"+ "互斥执行"组合的场景。
+
+### 8.15.6 Forked Agent 的 Prompt Cache 共享
+
+所有后台 Agent（Session Memory、extractMemories、autoDream）都通过 `CacheSafeParams` 共享主循环的 prompt cache。这意味着即使后台 Agent 的 API 调用也有极高的缓存命中率，大幅降低成本。设计原则是：**后台任务的 system prompt + 消息前缀必须与主循环完全相同**——任何差异都会导致缓存未命中。这也是为什么 Dream 的工具约束放在 `extra` 参数而不是修改共享 prompt 的原因。
+
+### 8.15.7 "怀疑旧记忆"原则
+
+"Before recommending from memory" 的验证要求（grep 函数名、检查文件是否存在）是所有记忆系统都应该实现的。记忆越老越可能过时。在推荐之前花几次工具调用验证，远好过给出过时的建议。
+
+这套 Memory 系统将 Claude Code 从一个"无状态的 LLM 对话"提升为一个"有记忆的 Agent"——它能记住用户的偏好、项目的约定、工作的进展，并在需要时把这些记忆注入到 Agent 的 context 中。更重要的是，它展示了一个完整的 Agent 记忆架构：静态指令、会话笔记、持久记忆、定期整理——四个层次协作，构成了一个从认知科学中汲取灵感的工程系统。
