@@ -1,5 +1,5 @@
 
-# 第 16 章：Sub-Agent 与 Team — 多智能体协作
+# 第 17 章：Sub-Agent 与 Team — 多智能体协作
 
 > **核心问题**：一个 Agent 如何将复杂任务分解为子任务，交给专门的 Sub-Agent 执行？多个 Agent 如何在同一个代码库上并行协作而不冲突？
 
@@ -7,7 +7,7 @@ Claude Code 实现了一个三层协作模型：**Sub-Agent**（同步/异步子
 
 ---
 
-## 16.1 架构概览
+## 17.1 架构概览
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -43,7 +43,7 @@ Claude Code 实现了一个三层协作模型：**Sub-Agent**（同步/异步子
 
 ---
 
-## 16.2 AgentTool：统一的 Agent 调用入口
+## 17.2 AgentTool：统一的 Agent 调用入口
 
 ### 工具定义
 
@@ -109,7 +109,7 @@ AgentTool.call()
 
 ---
 
-## 16.3 Agent 定义系统
+## 17.3 Agent 定义系统
 
 ### AgentDefinition 结构
 
@@ -187,7 +187,7 @@ export function filterDeniedAgents<T extends { agentType: string }>(
 
 ---
 
-## 16.4 Task 系统
+## 17.4 Task 系统
 
 ### TaskType 和 TaskStatus
 
@@ -257,7 +257,7 @@ killAsyncAgent()          // 强制终止
 
 ---
 
-## 16.5 Worktree 隔离
+## 17.5 Worktree 隔离
 
 当 agent 使用 `isolation: 'worktree'` 时，会创建一个独立的 Git worktree：
 
@@ -289,7 +289,7 @@ import { createAgentWorktree, hasWorktreeChanges, removeAgentWorktree }
 
 ---
 
-## 16.6 Team 协作：多 Agent 通信
+## 17.6 Team 协作：多 Agent 通信
 
 ### 队友生成
 
@@ -354,7 +354,7 @@ type TeammateSpawnedOutput = {
 
 ---
 
-## 16.7 MCP Server 要求
+## 17.7 MCP Server 要求
 
 Agent 定义可以指定必需的 MCP server，系统在启动前验证：
 
@@ -397,7 +397,7 @@ export function filterAgentsByMcpRequirements(
 
 ---
 
-## 16.8 Fork Agent：上下文克隆分支
+## 17.8 Fork Agent：上下文克隆分支
 
 Fork Agent 是一种特殊的 Sub-Agent 模式，它将主 Agent 的完整消息历史传递给子 Agent：
 

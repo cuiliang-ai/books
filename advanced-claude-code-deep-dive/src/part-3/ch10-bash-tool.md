@@ -1,5 +1,5 @@
 
-# 第 9 章：Bash 工具 — 最强大也最危险的能力
+# 第 10 章：Bash 工具 — 最强大也最危险的能力
 
 > **核心问题**：如何在给 LLM 完整的 shell 执行能力的同时，防止它执行危险命令、泄露数据、或被 prompt injection 利用？
 
@@ -11,7 +11,7 @@ Bash 工具是 Claude Code 中最强大的工具 — 它赋予 LLM 执行任意 
 
 ---
 
-## 9.1 BashTool 架构概览
+## 10.1 BashTool 架构概览
 
 ### 文件结构
 
@@ -87,7 +87,7 @@ LLM 生成 tool_use: Bash({command: "npm test", timeout: 30000})
 
 ---
 
-## 9.2 Input Schema 与核心参数
+## 10.2 Input Schema 与核心参数
 
 ### inputSchema 定义
 
@@ -132,7 +132,7 @@ export function getMaxTimeoutMs(): number {
 
 ---
 
-## 9.3 安全验证器链
+## 10.3 安全验证器链
 
 ### bashSecurity.ts：20+ 验证器
 
@@ -252,7 +252,7 @@ function isSafeHeredoc(command: string): boolean {
 
 ---
 
-## 9.4 权限检查：bashToolHasPermission
+## 10.4 权限检查：bashToolHasPermission
 
 ### 权限检查主流程
 
@@ -328,7 +328,7 @@ export const MAX_SUGGESTED_RULES_FOR_COMPOUND = 5
 
 ---
 
-## 9.5 只读命令识别
+## 10.5 只读命令识别
 
 ### readOnlyValidation.ts
 
@@ -388,7 +388,7 @@ const COMMAND_SEMANTICS: Map<string, CommandSemantic> = new Map([
 
 ---
 
-## 9.6 沙箱系统
+## 10.6 沙箱系统
 
 ### shouldUseSandbox 决策
 
@@ -457,7 +457,7 @@ function getSimpleSandboxSection(): string {
 
 ---
 
-## 9.7 命令执行与输出处理
+## 10.7 命令执行与输出处理
 
 ### Shell 执行
 
@@ -550,7 +550,7 @@ export function resetCwdIfOutsideProject(
 
 ---
 
-## 9.8 搜索/读取命令分类
+## 10.8 搜索/读取命令分类
 
 ### isSearchOrReadBashCommand
 
@@ -588,7 +588,7 @@ const BASH_SEMANTIC_NEUTRAL_COMMANDS = new Set([
 
 ---
 
-## 9.9 后台执行
+## 10.9 后台执行
 
 ### run_in_background 机制
 
@@ -632,7 +632,7 @@ type BashProgress = {
 
 ---
 
-## 9.10 Prompt 工程：引导 LLM 正确使用
+## 10.10 Prompt 工程：引导 LLM 正确使用
 
 ### 工具偏好引导
 
@@ -680,7 +680,7 @@ Avoid unnecessary `sleep` commands:
 
 ---
 
-## 9.11 sed 编辑的特殊处理
+## 10.11 sed 编辑的特殊处理
 
 ### sed 命令解析
 

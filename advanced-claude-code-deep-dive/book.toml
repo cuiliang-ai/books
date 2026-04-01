@@ -10,9 +10,7 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
-git-repository-url = "https://github.com/cuiliang-ai/books"
-edit-url-template = "https://github.com/cuiliang-ai/books/edit/main/advanced-claude-code-deep-dive/{path}"
 default-theme = "light"
 preferred-dark-theme = "coal"
-site-url = "/books/advanced-claude-code-deep-dive/"
+site-url = "/advanced-claude-code-deep-dive/"
 additional-css = ["custom.css"]

@@ -1,5 +1,5 @@
 
-# 第 22 章：未来展望 — 从 Feature Flag 窥见明天
+# 第 28 章：未来展望 — 从 Feature Flag 窥见明天
 
 > **核心问题**：Claude Code 的源码中隐藏着大量未完全开放的 feature flag 和模块 — KAIROS、COORDINATOR_MODE、BRIDGE_MODE、VOICE_MODE、PROACTIVE、AGENT_TRIGGERS。这些"暗门"暗示了 Coding Agent 的哪些进化方向？从终端工具到 AI 操作系统，还有多远？
 
@@ -7,7 +7,7 @@
 
 ---
 
-## 22.1 Feature Flag 全景：源码中的未来信号
+## 28.1 Feature Flag 全景：源码中的未来信号
 
 ### 从源码中搜集的所有 feature flag
 
@@ -50,7 +50,7 @@ Feature Flag 分类图谱：
 
 ---
 
-## 22.2 方向一：从终端到 IDE — Bridge 模式的演进
+## 28.2 方向一：从终端到 IDE — Bridge 模式的演进
 
 ### 当前状态
 
@@ -123,7 +123,7 @@ Phase 2: IDE 无关的通用 Bridge
 
 ---
 
-## 22.3 方向二：KAIROS — 从工具到助手
+## 28.3 方向二：KAIROS — 从工具到助手
 
 ### 源码证据
 
@@ -209,7 +209,7 @@ KAIROS 模式:
 
 ---
 
-## 22.4 方向三：Coordinator Mode — 多 Agent 协作
+## 28.4 方向三：Coordinator Mode — 多 Agent 协作
 
 ### 从单 Agent 到 Agent 团队
 
@@ -308,7 +308,7 @@ type TeammateOptions = {
 
 ---
 
-## 22.5 方向四：Voice Mode — 语音交互
+## 28.5 方向四：Voice Mode — 语音交互
 
 ```typescript
 // voice/voiceModeEnabled.ts — 语音模式的三层检查
@@ -360,7 +360,7 @@ Voice：用户说话 → 语音转文字 → Agent 处理 → 文字回复（→
 
 ---
 
-## 22.6 方向五：Proactive 与 Agent Triggers
+## 28.6 方向五：Proactive 与 Agent Triggers
 
 ### 从"被动等待"到"主动行为"
 
@@ -417,7 +417,7 @@ Agent Triggers 生态：
 
 ---
 
-## 22.7 汇聚：Coding Agent 的进化路线图
+## 28.7 汇聚：Coding Agent 的进化路线图
 
 从这些 feature flag 中，我们可以拼出一条清晰的进化路线：
 
@@ -472,7 +472,7 @@ Stage 6: 自主 Agent 网络 (UDS + Triggers)
 
 ---
 
-## 22.8 技术趋势与开放问题
+## 28.8 技术趋势与开放问题
 
 ### 趋势 1：上下文窗口持续增长
 
@@ -536,7 +536,7 @@ Machine A                    Machine B
 
 ---
 
-## 22.9 小结：从源码阅读到未来想象
+## 28.9 小结：从源码阅读到未来想象
 
 ```
 本书的旅程：

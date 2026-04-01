@@ -1,3 +1,5 @@
+[← 返回书架](https://book.cuiliang.ai/)
+
 # Claude Code 源码深度解析
 
 > **基于 Claude Code 原始 TypeScript 源码的架构深度解析 — 不再是反编译猜测，而是直面真实代码**
@@ -173,7 +175,6 @@ const reactiveCompact = feature('REACTIVE_COMPACT')
 
 - **作者**：[Liang Cui](https://cuiliang.ai/about/)
 - **分析对象**：Claude Code 原始 TypeScript 源码
-- **源码**：[GitHub](https://github.com/cuiliang-ai/books)
 - **状态**：持续更新中
 
 ---
