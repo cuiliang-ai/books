@@ -1,5 +1,5 @@
 
-# 第 24 章：隐藏功能与彩蛋
+# 第 25 章：隐藏功能与彩蛋
 
 > **核心问题**：在 Claude Code 的源码中隐藏着哪些未公开的有趣功能？从虚拟宠物到全局状态单例，从上游代理到内部专属特性，这些"隐藏宝藏"揭示了什么样的工程文化？
 
@@ -9,7 +9,7 @@
 
 ---
 
-## 24.1 虚拟宠物系统：一只住在终端里的伙伴
+## 25.1 虚拟宠物系统：一只住在终端里的伙伴
 
 这是 Claude Code 最令人惊喜的隐藏功能 — 一个完整的虚拟宠物系统，藏在 `src/buddy/` 目录的 6 个文件中。当你在终端输入 `/buddy` 时，一只由你的 userId 确定性生成的 ASCII 小动物会出现在输入框旁边，偶尔在对话泡泡中发表评论。
 
@@ -281,7 +281,7 @@ that you're not ${name} — they know. Don't narrate what ${name} might say
 
 ---
 
-## 24.2 全局启动状态：一个被三重警告守护的单例
+## 25.2 全局启动状态：一个被三重警告守护的单例
 
 `bootstrap/state.ts` 是整个 Claude Code 的"全局记忆" — 一个包含 100+ 字段的模块级单例。它的特殊之处不在于复杂性，而在于**旁边的注释**：
 
@@ -374,7 +374,7 @@ afkModeHeaderLatched: boolean | null
 
 ---
 
-## 24.3 CCR 上游代理：容器环境中的隐形管道
+## 25.3 CCR 上游代理：容器环境中的隐形管道
 
 `src/upstreamproxy/` 包含了一个精密的网络代理系统，专为 CCR（Claude Code Remote）容器环境设计。这不是一个玩具功能 — 它涉及 MITM 代理、CA 证书管理、反调试保护和 protobuf 编码。
 
@@ -482,7 +482,7 @@ function setNonDumpable(): void {
 
 ---
 
-## 24.4 Anthropic 内部特性：`'ant'` 门控
+## 25.4 Anthropic 内部特性：`'ant'` 门控
 
 Claude Code 的构建系统区分了两种用户类型：`external`（公开版）和 `ant`（Anthropic 内部版）。通过 `process.env.USER_TYPE === 'ant'` 的编译时门控，大量内部专属功能被有条件编译：
 
@@ -574,7 +574,7 @@ export function useMoreRight(_args: {
 
 ---
 
-## 24.5 其他彩蛋与有趣细节
+## 25.5 其他彩蛋与有趣细节
 
 ### 188 个加载动词
 
@@ -675,7 +675,7 @@ export function markScrollActivity(): void {
 
 ---
 
-## 24.6 工程文化的彩蛋
+## 25.6 工程文化的彩蛋
 
 这些隐藏功能共同描绘了 Claude Code 团队的工程文化：
 

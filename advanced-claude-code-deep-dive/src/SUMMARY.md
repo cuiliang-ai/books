@@ -41,14 +41,15 @@
 - [第 21 章：Coordinator 与 Swarm — 编排式多智能体](part-5/ch21-coordinator-swarm.md)
 - [第 22 章：终端交互增强 — 快捷键、Vim 与语音](part-5/ch22-terminal-interaction.md)
 - [第 23 章：插件系统与配置迁移](part-5/ch23-plugins-migrations.md)
-- [第 24 章：隐藏特性与工程彩蛋](part-5/ch24-hidden-features.md)
+- [第 24 章：定时任务与调度系统 — Agent 的时间感知](part-5/ch24-scheduled-tasks.md)
+- [第 25 章：隐藏特性与工程彩蛋](part-5/ch25-hidden-features.md)
 
 # 第六篇 · 实战与展望
 
-- [第 25 章：设计哲学](part-6/ch25-design-philosophy.md)
-- [第 26 章：构建你的 Agent](part-6/ch26-build-your-agent.md)
-- [第 27 章：关键实现挑战](part-6/ch27-implementation-challenges.md)
-- [第 28 章：未来展望](part-6/ch28-future-outlook.md)
+- [第 26 章：设计哲学](part-6/ch26-design-philosophy.md)
+- [第 27 章：构建你的 Agent](part-6/ch27-build-your-agent.md)
+- [第 28 章：关键实现挑战](part-6/ch28-implementation-challenges.md)
+- [第 29 章：未来展望](part-6/ch29-future-outlook.md)
 
 # 附录
 
