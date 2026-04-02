@@ -54,3 +54,4 @@
 # 附录
 
 - [附录 A：System Prompt 与关键 Prompt 全录](appendix-a-prompts.md)
+- [附录 B：Feature Flag 完整索引](appendix-b-feature-flags.md)
