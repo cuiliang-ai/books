@@ -544,25 +544,28 @@ Machine A                    Machine B
 Part 1 (ch01-03): Claude Code 是什么？
   → 从外部了解这个产品
 
-Part 2 (ch04-07): 核心引擎如何运转？
-  → 深入 Agentic Loop / API / System Prompt / Context
+Part 2 (ch04-08): 核心引擎如何运转？
+  → 深入 Agentic Loop / API / System Prompt / Context / Memory
 
-Part 3 (ch08-12): 工具系统如何工作？
+Part 3 (ch09-13): 工具系统如何工作？
   → 拆解 Bash / File IO / Git / MCP
 
-Part 4 (ch13-18): 安全与 UI 如何设计？
-  → 理解权限 / 沙箱 / Hooks / SubAgent / Terminal UI
+Part 4 (ch14-19): 安全与扩展如何设计？
+  → 理解权限 / 沙箱 / Hooks / SubAgent / Slash 命令 / Terminal UI
 
-Part 5 (ch19-22): 从理解到创造
+Part 5 (ch20-25): 进阶子系统
+  → Remote Control / Coordinator / 终端交互 / 插件 / 调度 / 彩蛋
+
+Part 6 (ch26-29): 从理解到创造
   → 设计哲学 / 构建指南 / 工程挑战 / 未来展望
 ```
 
 Claude Code 的源码告诉我们，构建一个生产级 Coding Agent 不仅仅是"调用 LLM API + 执行工具"。它需要：
 
-- **一套设计哲学**来指导每一个架构决策（第 19 章）
-- **一系列可复用的模式**来构建可靠的系统（第 20 章）
-- **对工程复杂性的深刻理解**来处理真实世界的边界情况（第 21 章）
-- **对未来趋势的判断**来做出可持续的技术投资（第 22 章）
+- **一套设计哲学**来指导每一个架构决策（第 26 章）
+- **一系列可复用的模式**来构建可靠的系统（第 27 章）
+- **对工程复杂性的深刻理解**来处理真实世界的边界情况（第 28 章）
+- **对未来趋势的判断**来做出可持续的技术投资（第 29 章）
 
 从源码中我们看到，Claude Code 不是一个"完成品" — 它是一个**活跃进化的系统**。每一个 feature flag 都是一个方向探索，每一个 lazy require 都是一次工程权衡，每一行注释都是一次经验沉淀。
 

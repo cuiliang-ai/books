@@ -464,7 +464,7 @@ async checkPermissions(input, context): Promise<PermissionDecision> {
 }
 ```
 
-而 Bash 工具有最复杂的权限逻辑（`bashToolHasPermission`），涉及命令解析、路径验证、安全检查等多个步骤（详见第 9 章）。
+而 Bash 工具有最复杂的权限逻辑（`bashToolHasPermission`），涉及命令解析、路径验证、安全检查等多个步骤（详见第 10 章）。
 
 ### preparePermissionMatcher
 
