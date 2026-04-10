@@ -1,4 +1,4 @@
-[← 返回书架](https://book.cuiliang.ai/)
+[← 返回书架](https://cuiliang.ai/books/)
 
 # Claude Code Deep Dive
 
