@@ -13,9 +13,112 @@ Hermes Agent 的六种运行模态（CLI、Gateway、ACP、Batch、RL、MCP Serv
 
 但这并不意味着 AIAgent 内部没有结构。它的构造函数将 50+ 个参数组织为七个概念分区，每个分区对应一个子系统。理解这些分区比记住每个参数都重要得多。
 
+在潜入参数列表之前，先给自己一张地图。
+
 ---
 
-## 4.2 构造参数的七个分区
+## 4.2 AIAgent 内部解剖图
+
+第 3 章用"五层蛋糕"展示了整个 Hermes 系统的分层。现在我们要切换焦点——从系统全貌缩放到 AIAgent 类的内部，看看这 10,594 行代码到底由哪些子系统组成，以及它们之间如何协作。
+
+### 组件关系图
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        AIAgent (run_agent.py:492)                    │
+│                                                                      │
+│  ┌─────────────────┐  ┌──────────────┐  ┌─────────────────────────┐ │
+│  │ IterationBudget  │  │ _SafeWriter  │  │  11 Callbacks           │ │
+│  │ 迭代边界 · 线程安全│  │ I/O 安全网   │  │  → CLI / Gateway / ACP  │ │
+│  └──────┬──────────┘  └──────────────┘  └─────────────────────────┘ │
+│         │                                                            │
+│  ┌──────▼──────────────────────────────────────────────────────────┐ │
+│  │               run_conversation() — 主循环引擎                    │ │
+│  │                                                                  │ │
+│  │  ┌─────────────────┐ ┌─────────────────┐ ┌──────────────────┐  │ │
+│  │  │_build_system    │ │ _call_model()   │ │ _handle_tool     │  │ │
+│  │  │ _prompt()       │ │ API 调用 · 流式  │ │ _calls()         │  │ │
+│  │  │ 7 层组装        │ │ 错误恢复 · 降级  │ │ 工具发现 · 分发   │  │ │
+│  │  └────────┬────────┘ └────────┬────────┘ └────────┬─────────┘  │ │
+│  └───────────┼──────────────────┼───────────────────┼─────────────┘ │
+│              │                  │                   │               │
+│  ┌───────────▼───┐  ┌──────────▼───────┐  ┌───────▼────────────┐  │
+│  │ContextEngine  │  │  Model Client    │  │  ToolRegistry      │  │
+│  │ 上下文压缩     │  │  ┌─OpenAI SDK   │  │  50+ 工具          │  │
+│  │ 阈值触发 · 摘要 │  │  ├─Anthropic    │  │  ┌terminal (×6)   │  │
+│  │ 可插拔引擎     │  │  └─Credential   │  │  ├file_tools       │  │
+│  └───────────────┘  │    Pool · 轮换   │  │  ├browser          │  │
+│                     └──────────────────┘  │  ├web / mcp        │  │
+│  ┌───────────────┐  ┌──────────────────┐  │  ├skills / memory  │  │
+│  │MemoryManager  │  │   SessionDB      │  │  └delegate         │  │
+│  │ MEMORY.md     │  │   SQLite + FTS5  │  └────────────────────┘  │
+│  │ USER.md       │  │   会话存储 · 搜索 │                          │
+│  │ 8 个插件后端   │  │   轨迹保存       │                          │
+│  └───────────────┘  └──────────────────┘                          │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+七个子系统，一个控制循环。上半部分是**控制面**——IterationBudget 决定 Agent 能走多远，11 个回调把内部事件投递给外部 UI。中间是**引擎**——`run_conversation()` 驱动"提示构建 → API 调用 → 工具执行"的 while 循环。下半部分是**基础设施**——上下文管理、模型通信、工具生态、记忆持久化、会话存储。
+
+### 职责速览
+
+在 drill down 之前，先用一张表建立坐标系——每个子系统做什么、对应哪些关键字段、在本章哪一节展开：
+
+| # | 职责 | 关键字段 / 方法 | 本章详见 |
+|---|------|----------------|---------|
+| 1 | 模型通信 — 连接 LLM | `client`, `_anthropic_client`, `credential_pool` | §4.5, §4.6 |
+| 2 | 迭代控制 — 防止无限循环 | `iteration_budget`, `max_iterations` | §4.8 |
+| 3 | 系统提示 — 定义 Agent 行为 | `_cached_system_prompt`, `_build_system_prompt()` | 第 6 章 |
+| 4 | 上下文管理 — 驾驭有限窗口 | `context_compressor`, `compression_enabled` | §4.12, 第 7 章 |
+| 5 | 记忆与学习 — 跨会话进化 | `_memory_store`, `_turns_since_memory`, `_iters_since_skill` | §4.7 |
+| 6 | 会话持久化 — 状态落盘 | `session_id`, `_session_db`, `persist_session` | §4.6 |
+| 7 | 回调通信 — 解耦 UI | 11 个 `*_callback` 参数 | §4.5 |
+
+后续各节将按构造函数的代码顺序逐一展开这些子系统。如果你在阅读中迷失，回到这张表定位自己的位置。
+
+### 生命周期：四个阶段
+
+AIAgent 的完整生命周期分为四个阶段。在进入参数细节之前，先记住这张时序图——后续所有内容都在这四个阶段中发生：
+
+```
+┌──────────────┐    ┌──────────────────┐    ┌────────────────────┐    ┌──────────────┐
+│  1. 构造      │───▶│  2. 系统提示构建  │───▶│  3. 对话循环        │───▶│  4. 清理      │
+│  __init__()  │    │  _build_system   │    │  run_conversation  │    │  cleanup_*   │
+│              │    │  _prompt()       │    │  () — N 轮         │    │              │
+└──────────────┘    └──────────────────┘    └────────────────────┘    └──────────────┘
+  50+ params          7 层组装               while loop              VM/浏览器释放
+  客户端创建           缓存到 session         工具执行                 会话持久化
+  工具加载            一次构建               流式输出                 轨迹保存
+  记忆加载                                   压缩/降级
+```
+
+- **阶段 1（构造）**：50+ 参数注入，创建 API 客户端，加载工具和记忆——本章 §4.3–§4.7 的主题。
+- **阶段 2（系统提示构建）**：七层组装，一次构建整个会话复用——第 6 章展开。
+- **阶段 3（对话循环）**：`run_conversation()` 的 while 循环，这是 Agent 最复杂的方法——第 5 章的主题。
+- **阶段 4（清理）**：`cleanup_vm()` 释放远程终端，`cleanup_browser()` 关闭 Playwright，`_persist_session()` 写入 SQLite。
+
+在 CLI 模式下，阶段 1 只执行一次，阶段 3 对每次用户输入重复执行。在 Gateway 模式下，阶段 1–4 对**每条消息**完整执行一次——这种差异通过 `conversation_history` 参数桥接（Gateway 每次传入完整历史，CLI 维护持续增长的消息列表）。
+
+### 一次调用的内部旅程
+
+用一个最简场景把上面的组件图走通。用户在 CLI 里说："帮我查看当前目录下有哪些 Python 文件"。
+
+1. **CLI → AIAgent**：`HermesCLI` 调用 `agent.run_conversation(user_message=..., conversation_history=...)`。Agent 进入阶段 3。
+2. **IterationBudget 检查**：`budget.consume()` 扣减一次迭代。预算够，继续。
+3. **系统提示注入**：从 `_cached_system_prompt` 取缓存的提示（阶段 2 已构建），连同 `conversation_history` 组装完整消息列表。
+4. **Model Client 调用**：`_call_model()` 通过 `self.client`（OpenAI SDK）或 `self._anthropic_client` 发送请求。`stream_delta_callback` 将流式 token 推给 CLI 的 TUI。
+5. **工具调用识别**：模型返回 `tool_calls: [{"name": "terminal", "arguments": {"command": "ls *.py"}}]`。
+6. **ToolRegistry 分发**：`_handle_tool_calls()` 查找注册表，找到 `terminal` 工具，调用 `terminal_tool.py` 的 handler。`tool_start_callback` 通知 CLI 显示执行动画。
+7. **执行后端执行**：terminal tool 通过 `BaseEnvironment.execute()` 在 Local 后端运行 `ls *.py`，返回文件列表。`tool_complete_callback` 通知 CLI 执行完成。
+8. **结果回注**：工具输出作为 `tool` role 消息追加到对话历史，再次进入循环（步骤 2）。
+9. **最终响应**：模型这次不再调用工具，而是返回文本总结。循环退出。
+10. **记忆检查**：`_turns_since_memory` 递增，如果达到 `_memory_nudge_interval`，MemoryManager 审查是否需要持久化新知识。
+
+这个旅程触及了 AIAgent 内部的所有七个子系统。后续章节将逐一深入每一步——但现在你已经知道全景了。
+
+---
+
+## 4.3 构造参数的七个分区
 
 `__init__` 从第 516 行开始，签名横跨近 60 行：
 
@@ -128,7 +231,7 @@ status_callback: callable = None,
 
 ---
 
-## 4.3 API 模式自动检测
+## 4.4 API 模式自动检测
 
 `__init__` 中最精妙的逻辑之一是 API 模式的自动检测。Hermes 支持三种 API 协议，必须在初始化时确定使用哪一种：
 
@@ -173,7 +276,7 @@ GPT-5.x 系列模型只能通过 Responses API 调用——如果用户配置了
 
 ---
 
-## 4.4 客户端初始化：两条路径
+## 4.5 客户端初始化：两条路径
 
 API 模式确定后，`__init__` 根据模式选择不同的客户端初始化路径。这是整个构造函数中最复杂的分支。
 
@@ -214,7 +317,7 @@ elif "api.kimi.com" in effective_base.lower():
 
 ---
 
-## 4.5 核心状态字段全景
+## 4.6 核心状态字段全景
 
 `__init__` 的后半段初始化了大量状态字段。这些字段可以分为六个生命周期层：
 
@@ -255,7 +358,7 @@ self._last_content_with_tools = None
 self.iteration_budget = iteration_budget or IterationBudget(max_iterations)
 ```
 
-每次 `run_conversation()` 调用会创建一个新的 `IterationBudget`（第 7635 行）。但如果 Agent 是子代理（subagent），它会继承父代理传入的 budget——这意味着父子共享迭代预算。IterationBudget 的设计将在 4.7 节详细分析。
+每次 `run_conversation()` 调用会创建一个新的 `IterationBudget`（第 7635 行）。但如果 Agent 是子代理（subagent），它会继承父代理传入的 budget——这意味着父子共享迭代预算。IterationBudget 的设计将在 4.8 节详细分析。
 
 **层四：上下文压缩器**
 
@@ -305,7 +408,7 @@ self._active_children_lock = threading.Lock()
 
 ---
 
-## 4.6 三条实例化路径
+## 4.7 三条实例化路径
 
 AIAgent 有三个主要的调用者，每个调用者的参数注入方式不同。
 
@@ -329,7 +432,7 @@ class AIAgent:
 
 ---
 
-## 4.7 IterationBudget：线程安全的迭代控制器
+## 4.8 IterationBudget：线程安全的迭代控制器
 
 `IterationBudget` 是 `run_agent.py` 中定义的第一个辅助类（第 169 行），也是理解 Agent 行为边界的关键：
 
@@ -379,7 +482,7 @@ class IterationBudget:
 
 ---
 
-## 4.8 _SafeWriter：让崩溃变成沉默
+## 4.9 _SafeWriter：让崩溃变成沉默
 
 `_SafeWriter` 出现在 AIAgent 之前（第 112 行），它解决的问题在注释中描述得很清楚：
 
@@ -410,29 +513,15 @@ class _SafeWriter:
 
 ---
 
-## 4.9 生命周期时序
+## 4.10 生命周期时序回顾
 
-AIAgent 的完整生命周期可以用四个阶段描述：
+AIAgent 的四阶段生命周期（构造 → 系统提示构建 → 对话循环 → 清理）已在 4.2 节的解剖图中完整展示。这里补充一个在 4.2 节未展开的运行模态差异：
 
-```
-┌──────────────┐    ┌──────────────────┐    ┌────────────────────┐    ┌──────────────┐
-│  1. 构造      │───▶│  2. 系统提示构建  │───▶│  3. 对话循环        │───▶│  4. 清理      │
-│  __init__()  │    │  _build_system   │    │  run_conversation  │    │  cleanup_*   │
-│              │    │  _prompt()       │    │  () — N 轮         │    │              │
-└──────────────┘    └──────────────────┘    └────────────────────┘    └──────────────┘
-  50+ params          7 层组装               while loop              VM/浏览器释放
-  客户端创建           缓存到 session         工具执行                 会话持久化
-  工具加载            一次构建               流式输出                 轨迹保存
-  记忆加载                                   压缩/降级
-```
-
-阶段 1（构造）在上文已经详细分析。阶段 2（系统提示构建）在第 6 章展开。阶段 3（对话循环）是第 5 章的主题。阶段 4（清理）分散在多个方法中——`cleanup_vm()` 释放远程终端环境，`cleanup_browser()` 关闭 Playwright 浏览器，`_persist_session()` 将消息写入 SQLite。
-
-在 Gateway 模式下，阶段 1-4 对每条消息都完整执行一次。在 CLI 模式下，阶段 1 只执行一次，阶段 3 对每次用户输入重复执行。这种差异通过 `conversation_history` 参数桥接——Gateway 每次都传入完整的历史，CLI 维护一个持续增长的消息列表。
+在 Gateway 模式下，阶段 1–4 对每条消息都完整执行一次——这意味着 `_turns_since_memory` 等实例级计数器在每条消息之间重置。为了弥补这个损失，类级别的 `_context_pressure_last_warned`（第 4.7 节）跨所有实例共享，确保用户不会在每条消息中都收到重复的上下文压力警告。
 
 ---
 
-## 4.10 配置的三层优先级
+## 4.11 配置的三层优先级
 
 AIAgent 的配置来源有三层优先级，从高到低：
 
@@ -467,7 +556,7 @@ compression_summary_model = _compression_cfg.get("summary_model") or None
 
 ---
 
-## 4.11 上下文引擎的可插拔选择
+## 4.12 上下文引擎的可插拔选择
 
 `__init__` 的最后一个重要段落是上下文引擎的选择。Hermes 支持用自定义引擎替换默认的 ContextCompressor（第 7 章详述），选择逻辑是 config-driven 的：
 
@@ -497,11 +586,11 @@ else:
     self.context_compressor = ContextCompressor(...)
 ```
 
-三级加载尝试：先从 `plugins/context_engine/<name>/` 目录加载，然后从通用插件系统加载，最后回退到内置的 ContextCompressor。这个模式与记忆提供商的加载模式一致（第 4.5 节）——Hermes 的所有可插拔组件都遵循同样的"config → plugin dir → general plugin → built-in"优先级。
+三级加载尝试：先从 `plugins/context_engine/<name>/` 目录加载，然后从通用插件系统加载，最后回退到内置的 ContextCompressor。这个模式与记忆提供商的加载模式一致（第 4.6 节）——Hermes 的所有可插拔组件都遵循同样的"config → plugin dir → general plugin → built-in"优先级。
 
 ---
 
-## 4.12 本章为什么重要
+## 4.13 本章为什么重要
 
 AIAgent 类是 Hermes Agent 的引力中心。后续每一章都在探索这个类的某个侧面：
 

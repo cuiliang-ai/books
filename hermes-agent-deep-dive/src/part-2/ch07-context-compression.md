@@ -488,7 +488,7 @@ if not summary:
 - 在 `handle_tool_call()` 中执行相似度搜索
 - 在 `should_compress()` 中基于向量存储的大小而非 token 数判断
 
-AIAgent 在初始化时通过 `context.engine` 配置选择引擎（参见第 4 章 4.6 节）。只有一个引擎活跃。主循环不关心引擎的内部实现——它只调用 ContextEngine 定义的接口。
+AIAgent 在初始化时通过 `context.engine` 配置选择引擎（参见第 4 章 4.7 节）。只有一个引擎活跃。主循环不关心引擎的内部实现——它只调用 ContextEngine 定义的接口。
 
 ---
 
