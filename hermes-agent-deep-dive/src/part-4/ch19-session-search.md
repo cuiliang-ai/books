@@ -394,7 +394,7 @@ asyncio.gather() — 并行发送给辅助 LLM
 
 ## 19.9 与其他章节的连接
 
-Session Search 构建在第 16 章的 SessionDB 之上——它直接调用 `search_messages()` 和 `get_messages_as_conversation()`，利用 FTS5 索引和 WAL 并发读取能力。FTS5 查询净化（`_sanitize_fts5_query`，第 16.6 节）确保了用户输入不会导致搜索崩溃。
+Session Search 构建在第 16 章的 SessionDB 之上——它直接调用 `search_messages()` 和 `get_messages_as_conversation()`，利用 FTS5 索引和 WAL 并发读取能力。FTS5 查询净化（`_sanitize_fts5_query`，第 16.7 节）确保了用户输入不会导致搜索崩溃。
 
 与第 17 章的 Memory 系统的关系是互补的。Memory 存储精炼的知识条目（"用户用的是 macOS"），Session Search 提供原始的对话回忆（"上次我们花了两个小时调试 CORS，最后发现是 nginx 配置问题"）。Memory 的 schema 描述明确说"不要把任务进度和完成记录存到 memory，用 session_search 去找那些东西"。
 
