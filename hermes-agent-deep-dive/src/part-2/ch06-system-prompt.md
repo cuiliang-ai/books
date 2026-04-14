@@ -30,6 +30,181 @@ def _build_system_prompt(self, system_message: str = None) -> str:
     #   7. Platform-specific formatting hint
 ```
 
+点击下方的 **"播放组装"** 按钮观看七层 System Prompt 的逐层组装过程，或点击任意层查看详情：
+
+<div class="rc-flow" id="sp-flow">
+  <div class="rc-flow-controls">
+    <button class="rc-play-btn" id="sp-play">▶ 播放组装</button>
+    <button id="sp-reset">重置</button>
+  </div>
+  <div class="rc-flow-body">
+    <div class="rc-flow-diagram">
+      <div class="rc-stage" data-stage="0">
+        <div class="rc-stage-title">L1 · Agent 身份</div>
+        <div class="rc-stage-sub">SOUL.md 或 DEFAULT_AGENT_IDENTITY</div>
+      </div>
+      <div class="rc-arrow" data-arrow="0">↓</div>
+      <div class="rc-stage" data-stage="1">
+        <div class="rc-stage-title">L2 · 工具行为指导</div>
+        <div class="rc-stage-sub">MEMORY / SKILLS / TOOL_USE 按模型注入</div>
+      </div>
+      <div class="rc-arrow" data-arrow="1">↓</div>
+      <div class="rc-stage" data-stage="2">
+        <div class="rc-stage-title">L3 · 工具执行力</div>
+        <div class="rc-stage-sub">GPT/Gemini 专用强制工具使用指令</div>
+      </div>
+      <div class="rc-arrow" data-arrow="2">↓</div>
+      <div class="rc-stage" data-stage="3">
+        <div class="rc-stage-title">L4 · 用户/网关 System Prompt</div>
+        <div class="rc-stage-sub">CLI 配置 / Gateway 平台消息</div>
+      </div>
+      <div class="rc-arrow" data-arrow="3">↓</div>
+      <div class="rc-stage" data-stage="4">
+        <div class="rc-stage-title">L5 · 记忆快照</div>
+        <div class="rc-stage-sub">MEMORY.md + USER.md + 外部 provider</div>
+      </div>
+      <div class="rc-arrow" data-arrow="4">↓</div>
+      <div class="rc-stage" data-stage="5">
+        <div class="rc-stage-title">L6 · 技能索引</div>
+        <div class="rc-stage-sub">78 个 SKILL 的 Tier 1 摘要</div>
+      </div>
+      <div class="rc-arrow" data-arrow="5">↓</div>
+      <div class="rc-stage" data-stage="6">
+        <div class="rc-stage-title">L7 · 上下文 · 时间 · 平台</div>
+        <div class="rc-stage-sub">AGENTS.md + 时间戳 + PLATFORM_HINTS</div>
+      </div>
+    </div>
+    <div class="rc-flow-detail" id="sp-detail">
+      <div class="rc-detail-placeholder">← 点击层方块或播放组装查看详情</div>
+    </div>
+  </div>
+  <div class="rc-progress">
+    <div class="rc-progress-dot" data-dot="0"></div>
+    <div class="rc-progress-dot" data-dot="1"></div>
+    <div class="rc-progress-dot" data-dot="2"></div>
+    <div class="rc-progress-dot" data-dot="3"></div>
+    <div class="rc-progress-dot" data-dot="4"></div>
+    <div class="rc-progress-dot" data-dot="5"></div>
+    <div class="rc-progress-dot" data-dot="6"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var layers = [
+    {
+      title: 'L1 · Agent 身份',
+      section: '200–2,000 tokens',
+      text: 'Agent 身份的来源有两个：<code>SOUL.md</code>（用户可定制人格）和硬编码的 <code>DEFAULT_AGENT_IDENTITY</code>。SOUL.md 优先且是<strong>替换</strong>而非追加——完全控制 Agent 的"灵魂"。默认身份的最后一句"Be targeted and efficient"与迭代预算机制形成配合。',
+      funcs: ['load_soul_md()', 'DEFAULT_AGENT_IDENTITY', 'prompt_builder.py:133']
+    },
+    {
+      title: 'L2 · 工具行为指导',
+      section: '500–2,000 tokens',
+      text: '根据 Agent 加载了哪些工具，按需注入对应指导。<code>MEMORY_GUIDANCE</code> 定义记忆质量标准——"记住那些能减少用户未来纠正次数的东西"。<code>SKILLS_GUIDANCE</code> 驱动技能创建和修补的闭环。只注入已加载工具的指导，避免浪费上下文空间。',
+      funcs: ['MEMORY_GUIDANCE', 'SESSION_SEARCH_GUIDANCE', 'SKILLS_GUIDANCE']
+    },
+    {
+      title: 'L3 · 工具执行力',
+      section: '按模型条件注入',
+      text: 'GPT/Codex/Gemini 等模型倾向于<em>描述计划</em>而非<em>执行行动</em>。此层注入 <code>TOOL_USE_ENFORCEMENT_GUIDANCE</code> 强制要求"说了就做"。Claude 系列天然积极使用工具，不注入此层。GPT 还有额外的 XML 标签指令（<code>&lt;tool_persistence&gt;</code> 等）。',
+      funcs: ['TOOL_USE_ENFORCEMENT_GUIDANCE', 'TOOL_USE_ENFORCEMENT_MODELS', 'OPENAI_MODEL_EXECUTION_GUIDANCE']
+    },
+    {
+      title: 'L4 · 用户/网关 System Prompt',
+      section: '0–1,000 tokens · 可选',
+      text: '来自调用者的自定义System Prompt——CLI 从用户配置读取，Gateway 从平台消息提取。<strong>追加</strong>而非替换，保留前面所有层。注意 <code>ephemeral_system_prompt</code> 不在此处注入，它在消息准备流水线中追加，不进入缓存。',
+      funcs: ['system_message', 'ephemeral_system_prompt']
+    },
+    {
+      title: 'L5 · 记忆快照',
+      section: '500–1,500 tokens',
+      text: '内置记忆（<code>MEMORY.md</code> / <code>USER.md</code>）和外部记忆提供商（Honcho、mem0）叠加注入。记忆内容在此刻被"<strong>冻结</strong>"——会话中写入的新记忆不会更新 System Prompt，直到压缩触发重建。这是 prompt caching 的刚性需求。',
+      funcs: ['_memory_store.format_for_system_prompt()', '_memory_manager.build_system_prompt()']
+    },
+    {
+      title: 'L6 · 技能索引',
+      section: '1,000–3,000 tokens',
+      text: '加载所有 SKILL.md 的 Tier 1 信息（标题 + 一句话描述），构建紧凑的技能目录。78 个技能的完整内容无法放入上下文，但标题让模型知道"能做什么"，需要时通过 <code>skill_view</code> 加载完整内容（三级渐进式披露）。',
+      funcs: ['build_skills_system_prompt()', 'skills_list', 'skill_view']
+    },
+    {
+      title: 'L7 · 上下文 · 时间 · 平台',
+      section: '50–5,200 tokens',
+      text: '上下文文件（AGENTS.md、.cursorrules、.hermes.md）提供项目级指令。时间戳让模型知道"现在"。<code>PLATFORM_HINTS</code> 为 15 个平台定制格式指导——WhatsApp 用纯文本，Cron 模式告诉模型"没有用户在场，完全自主执行"。上下文文件硬限 20,000 字符。',
+      funcs: ['build_context_files_prompt()', 'PLATFORM_HINTS', 'CONTEXT_FILE_MAX_CHARS']
+    }
+  ];
+
+  var current = -1;
+  var timer = null;
+  var playBtn = document.getElementById('sp-play');
+  var resetBtn = document.getElementById('sp-reset');
+  var detailEl = document.getElementById('sp-detail');
+  var stageEls = document.querySelectorAll('#sp-flow .rc-stage');
+  var arrowEls = document.querySelectorAll('#sp-flow .rc-arrow');
+  var dotEls = document.querySelectorAll('#sp-flow .rc-progress-dot');
+
+  function showStage(idx) {
+    current = idx;
+    stageEls.forEach(function(el, i) { el.classList.toggle('active', i === idx); });
+    arrowEls.forEach(function(el, i) { el.classList.toggle('active', i === idx - 1 || i === idx); });
+    dotEls.forEach(function(el, i) {
+      el.classList.remove('active', 'done');
+      if (i === idx) el.classList.add('active');
+      else if (i < idx) el.classList.add('done');
+    });
+    var s = layers[idx];
+    var funcsHtml = s.funcs.map(function(f) { return '<code>' + f + '</code>'; }).join('');
+    detailEl.innerHTML = '<div class="rc-detail-content">' +
+      '<h4>' + s.title + '</h4>' +
+      '<div class="rc-detail-section">' + s.section + '</div>' +
+      '<div class="rc-detail-text">' + s.text + '</div>' +
+      '<div class="rc-detail-funcs">' + funcsHtml + '</div>' +
+      '</div>';
+  }
+
+  function resetAll() {
+    if (timer) { clearInterval(timer); timer = null; }
+    current = -1;
+    playBtn.disabled = false;
+    playBtn.textContent = '▶ 播放组装';
+    stageEls.forEach(function(el) { el.classList.remove('active'); });
+    arrowEls.forEach(function(el) { el.classList.remove('active'); });
+    dotEls.forEach(function(el) { el.classList.remove('active', 'done'); });
+    detailEl.innerHTML = '<div class="rc-detail-placeholder">← 点击层方块或播放组装查看详情</div>';
+  }
+
+  playBtn.addEventListener('click', function() {
+    if (timer) return;
+    playBtn.disabled = true;
+    playBtn.textContent = '⏵ 组装中...';
+    var step = 0;
+    showStage(step);
+    timer = setInterval(function() {
+      step++;
+      if (step >= layers.length) {
+        clearInterval(timer); timer = null;
+        playBtn.disabled = false;
+        playBtn.textContent = '▶ 重新播放';
+        return;
+      }
+      showStage(step);
+    }, 1800);
+  });
+
+  resetBtn.addEventListener('click', resetAll);
+  stageEls.forEach(function(el) {
+    el.addEventListener('click', function() {
+      if (timer) { clearInterval(timer); timer = null; playBtn.disabled = false; playBtn.textContent = '▶ 播放组装'; }
+      showStage(parseInt(el.dataset.stage));
+    });
+  });
+})();
+</script>
+
+> **最终组装**：七层通过 `"\n\n".join()` 连接成一个字符串，空内容被过滤。典型总大小 5,000–15,000 tokens（详见 §6.7 大小预算表）。
+
 让我们逐层深入。
 
 ### 第一层：Agent 身份
