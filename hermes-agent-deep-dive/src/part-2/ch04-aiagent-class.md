@@ -23,39 +23,38 @@ Hermes Agent 的六种运行模态（CLI、Gateway、ACP、Batch、RL、MCP Serv
 
 ### 组件关系图
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        AIAgent (run_agent.py:492)                    │
-│                                                                      │
-│  ┌─────────────────┐  ┌──────────────┐  ┌─────────────────────────┐ │
-│  │ IterationBudget  │  │ _SafeWriter  │  │  11 Callbacks           │ │
-│  │ 迭代边界 · 线程安全│  │ I/O 安全网   │  │  → CLI / Gateway / ACP  │ │
-│  └──────┬──────────┘  └──────────────┘  └─────────────────────────┘ │
-│         │                                                            │
-│  ┌──────▼──────────────────────────────────────────────────────────┐ │
-│  │               run_conversation() — 主循环引擎                    │ │
-│  │                                                                  │ │
-│  │  ┌─────────────────┐ ┌─────────────────┐ ┌──────────────────┐  │ │
-│  │  │_build_system    │ │ _call_model()   │ │ _handle_tool     │  │ │
-│  │  │ _prompt()       │ │ API 调用 · 流式  │ │ _calls()         │  │ │
-│  │  │ 7 层组装        │ │ 错误恢复 · 降级  │ │ 工具发现 · 分发   │  │ │
-│  │  └────────┬────────┘ └────────┬────────┘ └────────┬─────────┘  │ │
-│  └───────────┼──────────────────┼───────────────────┼─────────────┘ │
-│              │                  │                   │               │
-│  ┌───────────▼───┐  ┌──────────▼───────┐  ┌───────▼────────────┐  │
-│  │ContextEngine  │  │  Model Client    │  │  ToolRegistry      │  │
-│  │ 上下文压缩     │  │  ┌─OpenAI SDK   │  │  50+ 工具          │  │
-│  │ 阈值触发 · 摘要 │  │  ├─Anthropic    │  │  ┌terminal (×6)   │  │
-│  │ 可插拔引擎     │  │  └─Credential   │  │  ├file_tools       │  │
-│  └───────────────┘  │    Pool · 轮换   │  │  ├browser          │  │
-│                     └──────────────────┘  │  ├web / mcp        │  │
-│  ┌───────────────┐  ┌──────────────────┐  │  ├skills / memory  │  │
-│  │MemoryManager  │  │   SessionDB      │  │  └delegate         │  │
-│  │ MEMORY.md     │  │   SQLite + FTS5  │  └────────────────────┘  │
-│  │ USER.md       │  │   会话存储 · 搜索 │                          │
-│  │ 8 个插件后端   │  │   轨迹保存       │                          │
-│  └───────────────┘  └──────────────────┘                          │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph AGENT["🔷 AIAgent — run_agent.py:492"]
+        direction TB
+
+        subgraph CTRL["控制面"]
+            IB["⏱ IterationBudget\n迭代边界 · 线程安全"]
+            SW["🛡 _SafeWriter\nI/O 安全网"]
+            CB["📡 11 Callbacks\n→ CLI / Gateway / ACP"]
+        end
+
+        subgraph ENGINE["run_conversation() — 主循环引擎"]
+            BSP["_build_system_prompt()\n7 层组装"]
+            CM["_call_model()\nAPI 调用 · 流式 · 降级"]
+            HTC["_handle_tool_calls()\n工具发现 · 分发"]
+        end
+
+        subgraph INFRA["基础设施层"]
+            CE["ContextEngine\n上下文压缩 · 可插拔"]
+            MC["Model Client\nOpenAI SDK · Anthropic\nCredential Pool · 轮换"]
+            TR["ToolRegistry\n50+ 工具\nterminal×6 · file · browser\nweb · mcp · delegate"]
+            MM["MemoryManager\nMEMORY.md · USER.md\n8 个插件后端"]
+            SDB["SessionDB\nSQLite + FTS5\n会话存储 · 轨迹保存"]
+        end
+    end
+
+    IB -->|预算控制| ENGINE
+    BSP --> CE
+    CM --> MC
+    HTC --> TR
+    ENGINE -->|持久化| MM
+    ENGINE -->|落盘| SDB
 ```
 
 七个子系统，一个控制循环。上半部分是**控制面**——IterationBudget 决定 Agent 能走多远，11 个回调把内部事件投递给外部 UI。中间是**引擎**——`run_conversation()` 驱动"提示构建 → API 调用 → 工具执行"的 while 循环。下半部分是**基础设施**——上下文管理、模型通信、工具生态、记忆持久化、会话存储。
@@ -80,16 +79,11 @@ Hermes Agent 的六种运行模态（CLI、Gateway、ACP、Batch、RL、MCP Serv
 
 AIAgent 的完整生命周期分为四个阶段。在进入参数细节之前，先记住这张时序图——后续所有内容都在这四个阶段中发生：
 
-```
-┌──────────────┐    ┌──────────────────┐    ┌────────────────────┐    ┌──────────────┐
-│  1. 构造      │───▶│  2. 系统提示构建  │───▶│  3. 对话循环        │───▶│  4. 清理      │
-│  __init__()  │    │  _build_system   │    │  run_conversation  │    │  cleanup_*   │
-│              │    │  _prompt()       │    │  () — N 轮         │    │              │
-└──────────────┘    └──────────────────┘    └────────────────────┘    └──────────────┘
-  50+ params          7 层组装               while loop              VM/浏览器释放
-  客户端创建           缓存到 session         工具执行                 会话持久化
-  工具加载            一次构建               流式输出                 轨迹保存
-  记忆加载                                   压缩/降级
+```mermaid
+flowchart LR
+    A["1. 构造\n__init__()\n50+ params\n客户端·工具·记忆"] --> B["2. 系统提示构建\n_build_system_prompt()\n7 层组装\n缓存到 session"]
+    B --> C["3. 对话循环\nrun_conversation()\nwhile loop\n工具执行·压缩·降级"]
+    C --> D["4. 清理\ncleanup_*()\nVM/浏览器释放\n会话持久化·轨迹保存"]
 ```
 
 - **阶段 1（构造）**：50+ 参数注入，创建 API 客户端，加载工具和记忆——本章 §4.3–§4.7 的主题。

@@ -121,6 +121,19 @@
     border-bottom-color: #2563eb;
 }
 
+/* === Mermaid diagrams === */
+.mermaid {
+    text-align: center;
+    margin: 1.5em 0;
+    padding: 1em 0;
+    background: transparent;
+}
+
+.mermaid svg {
+    max-width: 100%;
+    height: auto;
+}
+
 /* === Sidebar === */
 /* Active chapter highlight */
 .sidebar .sidebar-scrollbox .active {
