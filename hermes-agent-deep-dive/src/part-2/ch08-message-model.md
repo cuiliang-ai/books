@@ -161,7 +161,7 @@ for tc in m.get("tool_calls", []):
 
 当使用 OAuth 认证时，`build_anthropic_kwargs()` 执行三个额外的转换（第 1253-1291 行）：
 
-1. **系统提示前缀**：添加 `"You are Claude Code, Anthropic's official CLI for Claude."`
+1. **System Prompt 前缀**：添加 `"You are Claude Code, Anthropic's official CLI for Claude."`
 2. **产品名替换**：将 "Hermes Agent" 替换为 "Claude Code"，"Nous Research" 替换为 "Anthropic"——避免触发 Anthropic 的服务端内容过滤器
 3. **工具名前缀**：所有工具名添加 `mcp_` 前缀（Claude Code 约定），历史消息中的工具名同步更新
 

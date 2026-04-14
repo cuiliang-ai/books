@@ -1,13 +1,13 @@
 
-# 第 6 章：系统提示装配与 Prompt Caching
+# 第 6 章：System Prompt装配与 Prompt Caching
 
-> **核心问题**：七层系统提示如何组装？注入检测如何防御恶意内容？Prompt caching 为何要求 bit-perfect 一致性？
+> **核心问题**：七层System Prompt如何组装？注入检测如何防御恶意内容？Prompt caching 为何要求 bit-perfect 一致性？
 
 ---
 
-## 6.1 为什么系统提示如此重要
+## 6.1 为什么System Prompt如此重要
 
-系统提示是 LLM 看到的第一段文字。它决定了 Agent 的身份、能力边界、行为偏好，以及它对工具的使用策略。在 Hermes Agent 中，系统提示不是一段静态文本——它是七个层次动态组装的结果，每一层都有自己的数据来源和安全考量。
+System Prompt是 LLM 看到的第一段文字。它决定了 Agent 的身份、能力边界、行为偏好，以及它对工具的使用策略。在 Hermes Agent 中，System Prompt不是一段静态文本——它是七个层次动态组装的结果，每一层都有自己的数据来源和安全考量。
 
 `_build_system_prompt()` 位于 `run_agent.py:3057`，返回一个字符串。这个字符串在每个会话的第一轮构建一次，然后缓存到 `self._cached_system_prompt`（如第 5 章所述）。只有上下文压缩事件会触发重新构建——因为压缩会重新加载记忆，记忆内容可能已经改变。
 
@@ -94,7 +94,7 @@ MEMORY_GUIDANCE = (
 
 "Prioritize what reduces future user steering"——这句话定义了记忆的质量标准。不是"记住一切"，而是"记住那些能减少用户未来纠正次数的东西"。
 
-`SKILLS_GUIDANCE`（`agent/prompt_builder.py:163`）驱动技能创建和维护的闭环——Agent 不仅要创建技能，还要在发现技能过时时用 `skill_manage(action='patch')` 主动修补。这是第 1 章描述的"自进化"能力的系统提示层驱动力。
+`SKILLS_GUIDANCE`（`agent/prompt_builder.py:163`）驱动技能创建和维护的闭环——Agent 不仅要创建技能，还要在发现技能过时时用 `skill_manage(action='patch')` 主动修补。这是第 1 章描述的"自进化"能力的System Prompt层驱动力。
 
 ### 第三层：工具使用执行力
 
@@ -132,9 +132,9 @@ else:  # "auto"
 
 对于 GPT/Codex 模型，还有一段更激进的 `OPENAI_MODEL_EXECUTION_GUIDANCE`（`agent/prompt_builder.py:195`），包含 `<tool_persistence>`、`<mandatory_tool_use>`、`<act_dont_ask>`、`<verification>` 等 XML 标签包裹的详细行为指令。对于 Gemini/Gemma 模型，有 `GOOGLE_MODEL_OPERATIONAL_GUIDANCE`（`agent/prompt_builder.py:258`），强调绝对路径、验证优先、并行工具调用等。
 
-这种按模型定制行为指导的策略反映了一个现实：不同 LLM 有不同的行为偏差，通用的系统提示无法覆盖所有情况。
+这种按模型定制行为指导的策略反映了一个现实：不同 LLM 有不同的行为偏差，通用的System Prompt无法覆盖所有情况。
 
-### 第四层：用户/网关系统提示
+### 第四层：用户/网关System Prompt
 
 ```python
 # run_agent.py:3137-3138
@@ -144,7 +144,7 @@ if system_message is not None:
 
 `system_message` 来自调用者——CLI 从用户配置中读取，Gateway 从平台消息中提取。它被追加而不是替换，保留了所有前面的层。
 
-注意：`ephemeral_system_prompt` **不在**这里注入。它在 `run_conversation()` 的消息准备流水线中被追加到有效系统提示末尾（第 5 章 5.6 节），但不进入缓存的 `_cached_system_prompt`。这确保了临时提示不污染持久化的系统提示快照。
+注意：`ephemeral_system_prompt` **不在**这里注入。它在 `run_conversation()` 的消息准备流水线中被追加到有效System Prompt末尾（第 5 章 5.6 节），但不进入缓存的 `_cached_system_prompt`。这确保了临时提示不污染持久化的System Prompt快照。
 
 ### 第五层：记忆快照
 
@@ -171,7 +171,7 @@ if self._memory_manager:
 
 记忆有两个来源：内置的 MEMORY.md / USER.md（通过 `_memory_store`），以及外部记忆提供商（通过 `_memory_manager`，如 Honcho、mem0）。两者叠加而非互斥——内置记忆和外部记忆可以共存。
 
-记忆内容被"冻结"在系统提示中——即使 Agent 在会话过程中写入了新记忆，系统提示也不会更新，直到下一次压缩触发重建。这是 prompt caching 的刚性需求（见 6.5 节）。
+记忆内容被"冻结"在System Prompt中——即使 Agent 在会话过程中写入了新记忆，System Prompt也不会更新，直到下一次压缩触发重建。这是 prompt caching 的刚性需求（见 6.5 节）。
 
 ### 第六层：技能索引
 
@@ -222,7 +222,7 @@ return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
 
 ## 6.3 注入检测：在信任之前扫描
 
-系统提示的上下文文件层有一个独特的安全风险：它加载的是用户工作目录下的文件，这些文件可能被恶意修改。`_scan_context_content()` 在加载任何上下文文件之前执行安全扫描：
+System Prompt的上下文文件层有一个独特的安全风险：它加载的是用户工作目录下的文件，这些文件可能被恶意修改。`_scan_context_content()` 在加载任何上下文文件之前执行安全扫描：
 
 ```python
 # agent/prompt_builder.py:35-46
@@ -299,13 +299,13 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
 
 搜索在 git root 处停止——不会遍历到文件系统根目录。这是安全考量：用户的 home 目录或根目录可能包含不相关的上下文文件。`.hermes.md` 和 `HERMES.md` 两种命名都被接受。
 
-YAML frontmatter（`---` 分隔的结构化配置）在加载时被剥离——它将来可能用于模型覆盖等配置，但当前只保留人类可读的 markdown 正文注入到系统提示。
+YAML frontmatter（`---` 分隔的结构化配置）在加载时被剥离——它将来可能用于模型覆盖等配置，但当前只保留人类可读的 markdown 正文注入到System Prompt。
 
 ---
 
 ## 6.5 Prompt Caching 策略
 
-Anthropic 的 prompt caching 允许缓存系统提示和对话前缀，在多轮对话中避免重复处理相同的输入 tokens。Hermes 通过 `agent/prompt_caching.py` 实现了 **system_and_3** 策略。
+Anthropic 的 prompt caching 允许缓存System Prompt和对话前缀，在多轮对话中避免重复处理相同的输入 tokens。Hermes 通过 `agent/prompt_caching.py` 实现了 **system_and_3** 策略。
 
 ```python
 # agent/prompt_caching.py:40-71
@@ -332,9 +332,9 @@ def apply_anthropic_cache_control(
     return messages
 ```
 
-Anthropic 允许最多 4 个缓存断点。Hermes 的分配：**断点 1** 在系统提示（最稳定的部分），**断点 2-4** 在最后 3 条非系统消息（滑动窗口）。
+Anthropic 允许最多 4 个缓存断点。Hermes 的分配：**断点 1** 在System Prompt（最稳定的部分），**断点 2-4** 在最后 3 条非系统消息（滑动窗口）。
 
-为什么是"最后 3 条"而不是"前 3 条"？因为 LLM 的 KV cache 是前缀匹配的——只有从头部开始的连续匹配才能命中。系统提示是永远匹配的前缀，而最后几条消息标记了增量增长的部分，确保新增内容被缓存供下一轮复用。
+为什么是"最后 3 条"而不是"前 3 条"？因为 LLM 的 KV cache 是前缀匹配的——只有从头部开始的连续匹配才能命中。System Prompt是永远匹配的前缀，而最后几条消息标记了增量增长的部分，确保新增内容被缓存供下一轮复用。
 
 `_apply_cache_marker()` 处理了消息格式的多样性：
 
@@ -355,9 +355,9 @@ def _apply_cache_marker(msg, cache_marker, native_anthropic=False):
 
 当 content 是字符串时，它被转换为 Anthropic 的多块格式。当 content 已经是列表时，标记添加到最后一个块。
 
-缓存的经济效益：写入缓存的 token 成本是 1.25x，但后续命中时的读取成本只有 0.1x。在一个 20 轮的对话中，系统提示被读取 20 次——缓存使这些读取的成本降低 90%，轻松覆盖第一次的额外写入成本。
+缓存的经济效益：写入缓存的 token 成本是 1.25x，但后续命中时的读取成本只有 0.1x。在一个 20 轮的对话中，System Prompt被读取 20 次——缓存使这些读取的成本降低 90%，轻松覆盖第一次的额外写入成本。
 
-这就是为什么第 5 章中插件上下文被注入到用户消息而不是系统提示：修改系统提示会打破缓存前缀匹配。整个系统提示缓存机制——从 `_cached_system_prompt` 到 SQLite 存储到 prompt caching 断点——都服务于一个目标：**让系统提示在整个会话中 bit-perfect 不变**。
+这就是为什么第 5 章中插件上下文被注入到用户消息而不是System Prompt：修改System Prompt会打破缓存前缀匹配。整个System Prompt缓存机制——从 `_cached_system_prompt` 到 SQLite 存储到 prompt caching 断点——都服务于一个目标：**让System Prompt在整个会话中 bit-perfect 不变**。
 
 ---
 
@@ -389,19 +389,19 @@ WSL_ENVIRONMENT_HINT = (
 
 WSL 场景下，用户说"打开桌面上的文件"时，模型需要知道 `C:\Users\xxx\Desktop` 映射到 `/mnt/c/Users/xxx/Desktop`。这段提示将路径翻译的责任从用户转移到了 Agent。
 
-还有一个 Alibaba 特有的修复（`run_agent.py:3203`）：阿里巴巴的 Coding Plan API 无论请求哪个模型，返回的模型名称总是 "glm-4.7"。Hermes 在系统提示中注入正确的模型信息来覆盖这个 API bug。
+还有一个 Alibaba 特有的修复（`run_agent.py:3203`）：阿里巴巴的 Coding Plan API 无论请求哪个模型，返回的模型名称总是 "glm-4.7"。Hermes 在System Prompt中注入正确的模型信息来覆盖这个 API bug。
 
 ---
 
-## 6.7 系统提示的大小预算
+## 6.7 System Prompt的大小预算
 
-七层组装的结果可能非常庞大。在实际运行中，系统提示通常占用 5,000-15,000 tokens：
+七层组装的结果可能非常庞大。在实际运行中，System Prompt通常占用 5,000-15,000 tokens：
 
 | 层 | 典型大小 | 内容 |
 |---|---------|------|
 | L1: 身份 | 200-2,000 tokens | DEFAULT_AGENT_IDENTITY 或 SOUL.md |
 | L2: 工具指导 | 500-2,000 tokens | MEMORY + SKILLS + TOOL_USE_ENFORCEMENT |
-| L3: 用户系统提示 | 0-1,000 tokens | 可选 |
+| L3: 用户System Prompt | 0-1,000 tokens | 可选 |
 | L4: 记忆 | 500-1,500 tokens | MEMORY.md + USER.md |
 | L5: 技能索引 | 1,000-3,000 tokens | 78 个 SKILL 的 Tier 1 摘要 |
 | L6: 上下文文件 | 0-5,000 tokens | AGENTS.md, .cursorrules, .hermes.md |
@@ -409,15 +409,15 @@ WSL 场景下，用户说"打开桌面上的文件"时，模型需要知道 `C:\
 
 上下文文件有硬限制：`CONTEXT_FILE_MAX_CHARS = 20_000`（`agent/prompt_builder.py:399`）。超过此限制的上下文文件会被截断，防止一个巨大的 AGENTS.md 占据整个上下文窗口。
 
-结合第 7 章讨论的上下文压缩机制，系统提示的大小直接影响了可用于对话的上下文空间。这就是为什么记忆指导强调"keep it compact"——系统提示中的每一个 token 都是从对话空间中"借"来的。
+结合第 7 章讨论的上下文压缩机制，System Prompt的大小直接影响了可用于对话的上下文空间。这就是为什么记忆指导强调"keep it compact"——System Prompt中的每一个 token 都是从对话空间中"借"来的。
 
 ---
 
 ## 6.8 本章为什么重要
 
-系统提示是 Agent 行为的"宪法"——所有其他组件（工具、记忆、技能）都在系统提示定义的框架内运行。理解了七层组装，你就理解了为什么 Hermes 在不同平台、不同模型、不同用户之间表现出不同但一致的行为。
+System Prompt是 Agent 行为的"宪法"——所有其他组件（工具、记忆、技能）都在System Prompt定义的框架内运行。理解了七层组装，你就理解了为什么 Hermes 在不同平台、不同模型、不同用户之间表现出不同但一致的行为。
 
-第 5 章展示了系统提示如何被缓存和重用。第 7 章将展示上下文压缩如何触发系统提示的重建。第 8 章将讨论 prompt caching 如何与 Anthropic Messages API 适配器协同工作。
+第 5 章展示了System Prompt如何被缓存和重用。第 7 章将展示上下文压缩如何触发System Prompt的重建。第 8 章将讨论 prompt caching 如何与 Anthropic Messages API 适配器协同工作。
 
 ---
 

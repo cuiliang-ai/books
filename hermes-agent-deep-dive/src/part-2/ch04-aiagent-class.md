@@ -67,7 +67,7 @@ graph TB
 |---|------|----------------|---------|
 | 1 | 模型通信 — 连接 LLM | `client`, `_anthropic_client`, `credential_pool` | §4.5, §4.6 |
 | 2 | 迭代控制 — 防止无限循环 | `iteration_budget`, `max_iterations` | §4.8 |
-| 3 | 系统提示 — 定义 Agent 行为 | `_cached_system_prompt`, `_build_system_prompt()` | 第 6 章 |
+| 3 | System Prompt — 定义 Agent 行为 | `_cached_system_prompt`, `_build_system_prompt()` | 第 6 章 |
 | 4 | 上下文管理 — 驾驭有限窗口 | `context_compressor`, `compression_enabled` | §4.12, 第 7 章 |
 | 5 | 记忆与学习 — 跨会话进化 | `_memory_store`, `_turns_since_memory`, `_iters_since_skill` | §4.7 |
 | 6 | 会话持久化 — 状态落盘 | `session_id`, `_session_db`, `persist_session` | §4.6 |
@@ -81,13 +81,13 @@ AIAgent 的完整生命周期分为四个阶段。在进入参数细节之前，
 
 ```mermaid
 flowchart LR
-    A["1. 构造\n__init__()\n50+ params\n客户端·工具·记忆"] --> B["2. 系统提示构建\n_build_system_prompt()\n7 层组装\n缓存到 session"]
+    A["1. 构造\n__init__()\n50+ params\n客户端·工具·记忆"] --> B["2. System Prompt构建\n_build_system_prompt()\n7 层组装\n缓存到 session"]
     B --> C["3. 对话循环\nrun_conversation()\nwhile loop\n工具执行·压缩·降级"]
     C --> D["4. 清理\ncleanup_*()\nVM/浏览器释放\n会话持久化·轨迹保存"]
 ```
 
 - **阶段 1（构造）**：50+ 参数注入，创建 API 客户端，加载工具和记忆——本章 §4.3–§4.7 的主题。
-- **阶段 2（系统提示构建）**：七层组装，一次构建整个会话复用——第 6 章展开。
+- **阶段 2（System Prompt构建）**：七层组装，一次构建整个会话复用——第 6 章展开。
 - **阶段 3（对话循环）**：`run_conversation()` 的 while 循环，这是 Agent 最复杂的方法——第 5 章的主题。
 - **阶段 4（清理）**：`cleanup_vm()` 释放远程终端，`cleanup_browser()` 关闭 Playwright，`_persist_session()` 写入 SQLite。
 
@@ -99,7 +99,7 @@ flowchart LR
 
 1. **CLI → AIAgent**：`HermesCLI` 调用 `agent.run_conversation(user_message=..., conversation_history=...)`。Agent 进入阶段 3。
 2. **IterationBudget 检查**：`budget.consume()` 扣减一次迭代。预算够，继续。
-3. **系统提示注入**：从 `_cached_system_prompt` 取缓存的提示（阶段 2 已构建），连同 `conversation_history` 组装完整消息列表。
+3. **System Prompt注入**：从 `_cached_system_prompt` 取缓存的提示（阶段 2 已构建），连同 `conversation_history` 组装完整消息列表。
 4. **Model Client 调用**：`_call_model()` 通过 `self.client`（OpenAI SDK）或 `self._anthropic_client` 发送请求。`stream_delta_callback` 将流式 token 推给 CLI 的 TUI。
 5. **工具调用识别**：模型返回 `tool_calls: [{"name": "terminal", "arguments": {"command": "ls *.py"}}]`。
 6. **ToolRegistry 分发**：`_handle_tool_calls()` 查找注册表，找到 `terminal` 工具，调用 `terminal_tool.py` 的 handler。`tool_start_callback` 通知 CLI 显示执行动画。
@@ -196,7 +196,7 @@ status_callback: callable = None,
 | `parent_session_id` | `None` | 父会话 ID（用于压缩分裂谱系） |
 | `prefill_messages` | `None` | 预填充消息（few-shot 样例） |
 | `persist_session` | `True` | 是否持久化会话 |
-| `pass_session_id` | `False` | 是否在系统提示中注入 session ID |
+| `pass_session_id` | `False` | 是否在System Prompt中注入 session ID |
 
 **第五组：安全与记忆** 控制是否加载上下文文件、是否启用记忆系统。
 
@@ -509,7 +509,7 @@ class _SafeWriter:
 
 ## 4.10 生命周期时序回顾
 
-AIAgent 的四阶段生命周期（构造 → 系统提示构建 → 对话循环 → 清理）已在 4.2 节的解剖图中完整展示。这里补充一个在 4.2 节未展开的运行模态差异：
+AIAgent 的四阶段生命周期（构造 → System Prompt构建 → 对话循环 → 清理）已在 4.2 节的解剖图中完整展示。这里补充一个在 4.2 节未展开的运行模态差异：
 
 在 Gateway 模式下，阶段 1–4 对每条消息都完整执行一次——这意味着 `_turns_since_memory` 等实例级计数器在每条消息之间重置。为了弥补这个损失，类级别的 `_context_pressure_last_warned`（第 4.7 节）跨所有实例共享，确保用户不会在每条消息中都收到重复的上下文压力警告。
 

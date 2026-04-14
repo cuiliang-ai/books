@@ -14,7 +14,7 @@
 
 - [第 4 章：AIAgent 类全貌](part-2/ch04-aiagent-class.md)
 - [第 5 章：主循环解剖](part-2/ch05-main-loop.md)
-- [第 6 章：系统提示装配与 Prompt Caching](part-2/ch06-system-prompt.md)
+- [第 6 章：System Prompt装配与 Prompt Caching](part-2/ch06-system-prompt.md)
 - [第 7 章：上下文压缩与 Context Engine](part-2/ch07-context-compression.md)
 - [第 8 章：消息模型、API 适配与流式](part-2/ch08-message-model.md)
 - [第 9 章：错误分类、限流与路由降级](part-2/ch09-error-routing.md)

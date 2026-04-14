@@ -498,7 +498,7 @@ def _classify_400(error_msg, error_code, body, *, provider, model,
 2. Context engine 的 `context_length` 可能被下调（第 5 章中的"context probing"——探测实际的上下文上限）
 3. 用压缩后的消息列表重试
 
-如果压缩后仍然溢出（极端情况——系统提示本身就接近上下文限制），会话可能需要用户手动干预（`/new` 开始新会话）。
+如果压缩后仍然溢出（极端情况——System Prompt 本身就接近上下文限制），会话可能需要用户手动干预（`/new` 开始新会话）。
 
 `thinking_signature` 错误也有独特的恢复路径——它不需要压缩或换凭据，而是需要在下次发送时**剥离无效的 thinking 块**。适配器层自动处理这个（第 8 章 8.2.4 节），所以分类器只设 `retryable=True`。
 

@@ -81,9 +81,9 @@ else:
 
 如果这是 Gateway 入口而不是 CLI，路径类似但细节不同——`GatewayRunner` 会从 Telegram 的 `update.message.text` 中提取文本，查找或创建 `AIAgent` 实例，然后调用同一个 `run_conversation()`。入口不同，终点相同。
 
-### 阶段一：系统提示组装
+### 阶段一：System Prompt组装
 
-`run_conversation()` 的第一件大事是检查缓存的系统提示。如果这是**新会话的第一轮**，它调用 `_build_system_prompt()` 从七个层次组装完整的系统提示：
+`run_conversation()` 的第一件大事是检查缓存的System Prompt。如果这是**新会话的第一轮**，它调用 `_build_system_prompt()` 从七个层次组装完整的System Prompt：
 
 ```python
 # run_agent.py:3057 — _build_system_prompt()
@@ -125,9 +125,9 @@ prompt_parts.append(PLATFORM_HINTS.get(platform_key, ""))
 return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
 ```
 
-**关键设计决策**：系统提示在整个会话期间**只构建一次**，然后缓存在 `self._cached_system_prompt`。后续轮次直接复用，不重新构建。这不是性能优化——它是为了保持 Anthropic 的 **prompt caching** 命中率。如果每轮都重新构建系统提示（比如因为 MEMORY.md 内容变了），cache prefix 就会变化，之前缓存的 KV 对就全部失效。
+**关键设计决策**：System Prompt在整个会话期间**只构建一次**，然后缓存在 `self._cached_system_prompt`。后续轮次直接复用，不重新构建。这不是性能优化——它是为了保持 Anthropic 的 **prompt caching** 命中率。如果每轮都重新构建System Prompt（比如因为 MEMORY.md 内容变了），cache prefix 就会变化，之前缓存的 KV 对就全部失效。
 
-如果这是**继续会话**（Gateway 模式下每条消息创建新的 `AIAgent` 实例），系统提示从 SessionDB 中恢复而不是重新构建——同样是为了 cache 一致性。
+如果这是**继续会话**（Gateway 模式下每条消息创建新的 `AIAgent` 实例），System Prompt从 SessionDB 中恢复而不是重新构建——同样是为了 cache 一致性。
 
 一个安全细节值得注意：`prompt_builder.py:55` 在加载上下文文件前执行 **注入检测扫描**：
 
@@ -147,7 +147,7 @@ _CONTEXT_THREAT_PATTERNS = [
 
 ### 阶段二：迭代预算与进入主循环
 
-系统提示就绪后，`run_conversation()` 创建迭代预算并进入主循环：
+System Prompt就绪后，`run_conversation()` 创建迭代预算并进入主循环：
 
 ```python
 # run_agent.py:7635
@@ -199,10 +199,10 @@ for idx, msg in enumerate(messages):
     
     api_messages.append(api_msg)
 
-# 4. 系统提示放在最前面
+# 4. System Prompt放在最前面
 api_messages = [{"role": "system", "content": effective_system}] + api_messages
 
-# 5. Anthropic prompt caching — 给系统提示和最近 3 条消息加 cache_control
+# 5. Anthropic prompt caching — 给System Prompt和最近 3 条消息加 cache_control
 if self._use_prompt_caching:
     api_messages = apply_anthropic_cache_control(api_messages, ...)
 
@@ -210,7 +210,7 @@ if self._use_prompt_caching:
 api_messages = self._sanitize_api_messages(api_messages)
 ```
 
-这里有一个容易忽略的设计选择：**外部记忆上下文注入到 user 消息中，不注入到系统提示中**。注释解释了原因："system prompt modifications break the prompt cache prefix"。如果每轮都往系统提示里加新内容，Anthropic 的 prefix cache 就会每轮失效。所以 Hermes 选择把动态内容放进 user 消息——这保持了系统提示的稳定性，代价是用户消息变长了一点。
+这里有一个容易忽略的设计选择：**外部记忆上下文注入到 user 消息中，不注入到System Prompt中**。注释解释了原因："system prompt modifications break the prompt cache prefix"。如果每轮都往System Prompt里加新内容，Anthropic 的 prefix cache 就会每轮失效。所以 Hermes 选择把动态内容放进 user 消息——这保持了System Prompt的稳定性，代价是用户消息变长了一点。
 
 准备完消息后，发起 API 调用：
 
@@ -391,7 +391,7 @@ return {
   ├──① HermesCLI 捕获输入
   │     └──▶ agent.run_conversation(user_message, history, task_id)
   │
-  ├──② _build_system_prompt() 构建/复用系统提示
+  ├──② _build_system_prompt() 构建/复用System Prompt
   │     ├── SOUL.md / DEFAULT_AGENT_IDENTITY
   │     ├── MEMORY_GUIDANCE / SKILLS_GUIDANCE
   │     ├── MEMORY.md + USER.md 快照
@@ -646,7 +646,7 @@ def _run_async(coro):
 | 概念 | 核心文件 | 行数 | 后续章节 |
 |------|---------|------|---------|
 | AIAgent 类 | `run_agent.py` | 10,594 | 第 4–5 章 |
-| 系统提示组装 | `agent/prompt_builder.py` | — | 第 6 章 |
+| System Prompt组装 | `agent/prompt_builder.py` | — | 第 6 章 |
 | 上下文压缩 | `agent/context_compressor.py` | — | 第 7 章 |
 | 消息模型与流式 | `run_agent.py` (API 适配) | — | 第 8 章 |
 | 错误分类与路由 | `agent/error_classifier.py` | — | 第 9 章 |
@@ -678,7 +678,7 @@ def _run_async(coro):
 
 **第二**，工具通过 import-time 自注册。`tools/registry.py` 是零依赖的注册中心；每个工具文件 import 它并调用 `register()`；`model_tools.py` 通过 import 所有工具模块触发全部注册；`AIAgent` 通过 `get_tool_definitions()` 获取符合当前 toolset 配置的工具子集发给 LLM。
 
-**第三**，系统提示只构建一次然后缓存。这是为了 Anthropic prompt caching 的命中率。动态内容（记忆插件、用户上下文）注入到 user 消息中，不触碰系统提示。
+**第三**，System Prompt只构建一次然后缓存。这是为了 Anthropic prompt caching 的命中率。动态内容（记忆插件、用户上下文）注入到 user 消息中，不触碰System Prompt。
 
 带着这三个概念，你可以进入后续任何一章而不会迷路。
 
@@ -688,11 +688,11 @@ def _run_async(coro):
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `run_agent.py` | 10,594 | AIAgent 核心类、主循环、系统提示组装 |
+| `run_agent.py` | 10,594 | AIAgent 核心类、主循环、System Prompt组装 |
 | `model_tools.py` | ~540 | 工具编排层——发现、分发、async 桥接 |
 | `toolsets.py` | ~350 | 工具集定义与组合 |
 | `tools/registry.py` | ~200 | 中央工具注册表（零依赖） |
-| `agent/prompt_builder.py` | — | 系统提示组件——身份、指导、上下文文件、注入检测 |
+| `agent/prompt_builder.py` | — | System Prompt组件——身份、指导、上下文文件、注入检测 |
 | `agent/context_compressor.py` | — | 上下文压缩引擎 |
 | `agent/credential_pool.py` | — | 多凭据池 + fallback 链 |
 | `hermes_state.py` | — | SessionDB (SQLite + FTS5) |

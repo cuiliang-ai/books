@@ -191,7 +191,7 @@ agent = AIAgent(
 - `messaging` — 投递由调度器统一处理，Agent 不应自行发送消息
 - `clarify` — 无人值守模式下没有用户可以回答澄清请求
 
-`skip_context_files=True` 防止 cron 进程的工作目录（通常是 `~/.hermes/cron/`）中的 `SOUL.md`、`AGENTS.md` 注入系统提示词。`skip_memory=True` 更重要——cron 任务的系统提示词如果包含用户记忆的话，会导致记忆内容在不同场景下被错误引用。
+`skip_context_files=True` 防止 cron 进程的工作目录（通常是 `~/.hermes/cron/`）中的 `SOUL.md`、`AGENTS.md` 注入System Prompt词。`skip_memory=True` 更重要——cron 任务的System Prompt词如果包含用户记忆的话，会导致记忆内容在不同场景下被错误引用。
 
 **环境变量注入与清理**。`run_job()` 在 try 块中注入 origin 信息和投递目标到环境变量，在 finally 块中清理：
 
@@ -400,7 +400,7 @@ async def _register_session_mcp_servers(
 
 注册完成后，Agent 的工具列表被刷新——IDE 的 MCP 服务器提供的工具（如文件编辑、项目搜索）变得可用。这意味着 IDE 编辑器提供的上下文（打开的文件、光标位置、LSP 诊断）可以通过 MCP 工具流入 Hermes Agent。
 
-注册过程还会刷新 Agent 的 `valid_tool_names` 集合和系统提示词缓存——通过 `_invalidate_system_prompt()` 确保新注册的工具出现在系统提示词的工具描述中。
+注册过程还会刷新 Agent 的 `valid_tool_names` 集合和System Prompt词缓存——通过 `_invalidate_system_prompt()` 确保新注册的工具出现在System Prompt词的工具描述中。
 
 **认证机制**。`acp_adapter/auth.py` 中的 `detect_provider()` 和 `has_provider()` 检测当前配置的 AI 提供商，决定是否需要用户提供 API key。ACP 的 `AuthenticateResponse` 允许 IDE 弹出认证对话框，用户可以直接在 IDE 中输入 API key。
 

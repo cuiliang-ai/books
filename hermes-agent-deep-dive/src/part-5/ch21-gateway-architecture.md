@@ -129,7 +129,7 @@ class GatewayRunner:
 | `_pending_approvals` | `Dict[str, Dict]` | 等待 /approve 的会话 |
 | `_failed_platforms` | `Dict[Platform, Dict]` | 连接失败的平台及重试信息 |
 
-`_agent_cache` 特别值得关注。没有它，每条消息都会创建一个新的 AIAgent，重建系统提示词——这会破坏 Anthropic 等提供商的 prompt caching，导致成本增加约 10 倍。缓存以 `(AIAgent, config_signature_str)` 元组存储，当用户通过 `/model` 切换模型时 config_signature 改变，缓存自然失效。
+`_agent_cache` 特别值得关注。没有它，每条消息都会创建一个新的 AIAgent，重建System Prompt词——这会破坏 Anthropic 等提供商的 prompt caching，导致成本增加约 10 倍。缓存以 `(AIAgent, config_signature_str)` 元组存储，当用户通过 `/model` 切换模型时 config_signature 改变，缓存自然失效。
 
 `_running_agents` 是并发控制的核心。它的值有三种状态：不存在（空闲）、`_AGENT_PENDING_SENTINEL`（正在初始化）、真实的 AIAgent 实例（正在运行）。这个三态机制我们在 21.4 节详细讨论。
 
@@ -305,7 +305,7 @@ self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
 
 **步骤 7：Agent 对话**。`_handle_message_with_agent()`（第 3095 行）创建或复用 AIAgent，加载会话历史和上下文提示词，运行对话循环，处理会话过期通知和自动压缩。
 
-这个方法的第一件事是获取或创建 session entry，然后构建 session context——包含平台名、用户名、聊天类型等信息。context 被注入系统提示词，让 Agent 知道自己在哪个环境中运行：
+这个方法的第一件事是获取或创建 session entry，然后构建 session context——包含平台名、用户名、聊天类型等信息。context 被注入System Prompt词，让 Agent 知道自己在哪个环境中运行：
 
 ```python
 # gateway/run.py:3106-3140 (simplified)

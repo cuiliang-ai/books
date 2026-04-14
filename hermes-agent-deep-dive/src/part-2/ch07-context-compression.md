@@ -190,7 +190,7 @@ compress_start = self._align_boundary_forward(messages, compress_start)
 compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
 ```
 
-**头部保护**：`protect_first_n` 默认为 3，保护系统提示、用户的初始消息和第一次助手回复。这确保了会话的"起源语境"不会丢失。
+**头部保护**：`protect_first_n` 默认为 3，保护System Prompt、用户的初始消息和第一次助手回复。这确保了会话的"起源语境"不会丢失。
 
 **尾部保护**使用了 token 预算而非固定消息数——这是 v2 的重要改进。`_find_tail_cut_by_tokens()` 从末尾向前走，累积 token 直到达到 `tail_token_budget`（约为阈值的 20%）。这意味着在 200K 上下文的模型上，约 20K token 的最近对话会被保护。
 
@@ -357,7 +357,7 @@ def _compress_context(self, messages, system_message, *, approx_tokens=None,
     if todo_snapshot:
         compressed.append({"role": "user", "content": todo_snapshot})
 
-    # 5. 重建系统提示
+    # 5. 重建System Prompt
     self._invalidate_system_prompt()
     new_system_prompt = self._build_system_prompt(system_message)
 
@@ -494,7 +494,7 @@ AIAgent 在初始化时通过 `context.engine` 配置选择引擎（参见第 4 
 
 ## 7.12 与 Anthropic Prompt Caching 的交互
 
-压缩和 Prompt Caching（第 6 章 6.5 节）之间有一个微妙的交互：压缩后，系统提示被重建（`_invalidate_system_prompt()` + `_build_system_prompt()`），旧的 cache 断点失效。新的系统提示会获得新的 cache_control 标记，但这意味着第一次压缩后的 API 调用是一次**冷启动**——没有缓存命中，prompt tokens 按全价计费。
+压缩和 Prompt Caching（第 6 章 6.5 节）之间有一个微妙的交互：压缩后，System Prompt被重建（`_invalidate_system_prompt()` + `_build_system_prompt()`），旧的 cache 断点失效。新的System Prompt会获得新的 cache_control 标记，但这意味着第一次压缩后的 API 调用是一次**冷启动**——没有缓存命中，prompt tokens 按全价计费。
 
 后续调用会重新建立缓存。这是一次性的代价，通常被压缩节省的 token 数远远覆盖。
 

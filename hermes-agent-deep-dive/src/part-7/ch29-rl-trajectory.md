@@ -46,7 +46,7 @@ def save_trajectory(trajectory: List[Dict[str, Any]], model: str,
 
 `has_incomplete_scratchpad()` 函数检查是否有未关闭的 `<REASONING_SCRATCHPAD>` 标签——如果模型在推理中途被打断（迭代预算耗尽、用户中断），内容会有不完整的标签对。这些样本需要在训练前过滤掉，否则模型会学到"推理可以不完整"的坏模式。
 
-轨迹的实际生成发生在 `AIAgent._convert_to_trajectory_format()` 方法中（`run_agent.py`，由 `batch_runner.py` 调用）。这个方法将 OpenAI 格式的 `messages` 列表（`role` / `content` / `tool_calls`）转换为 ShareGPT 格式。转换过程中，system message 被丢弃（不泄露系统提示到训练数据），tool call 和 tool result 被保留为独立的对话轮次。
+轨迹的实际生成发生在 `AIAgent._convert_to_trajectory_format()` 方法中（`run_agent.py`，由 `batch_runner.py` 调用）。这个方法将 OpenAI 格式的 `messages` 列表（`role` / `content` / `tool_calls`）转换为 ShareGPT 格式。转换过程中，system message 被丢弃（不泄露System Prompt到训练数据），tool call 和 tool result 被保留为独立的对话轮次。
 
 ---
 
@@ -237,7 +237,7 @@ class ToolContext:
 
 `rl_cli.py` 是 RL 工作流的专用 CLI 入口。它与主 CLI（`hermes` 命令）分开，因为 RL 训练有几个根本性的不同需求。
 
-首先是**超长超时**——RL 训练工作流可能运行数小时，`RL_MAX_ITERATIONS = 200`（是标准 CLI 的 90 的两倍多）。其次是**专用系统提示**——`RL_SYSTEM_PROMPT`（`rl_cli.py:113-170`）是一个面向 RL 工程师的长指令，告诉模型如何发现环境、检查数据、创建环境、配置训练、测试推理、启动训练、监控指标。它描述了一个明确的八步工作流：DISCOVER → INSPECT → INSPECT DATA → CREATE → CONFIGURE → TEST → TRAIN → EVALUATE。
+首先是**超长超时**——RL 训练工作流可能运行数小时，`RL_MAX_ITERATIONS = 200`（是标准 CLI 的 90 的两倍多）。其次是**专用System Prompt**——`RL_SYSTEM_PROMPT`（`rl_cli.py:113-170`）是一个面向 RL 工程师的长指令，告诉模型如何发现环境、检查数据、创建环境、配置训练、测试推理、启动训练、监控指标。它描述了一个明确的八步工作流：DISCOVER → INSPECT → INSPECT DATA → CREATE → CONFIGURE → TEST → TRAIN → EVALUATE。
 
 第三是**限定 Toolset**——只启用 `["terminal", "web", "rl"]`，排除了不需要的工具。`rl` toolset 包含 10 个专用工具（`toolsets.py:135-145`）：`rl_list_environments`、`rl_select_environment`、`rl_get_current_config`、`rl_edit_config`、`rl_start_training`、`rl_check_status`、`rl_stop_training`、`rl_get_results`、`rl_list_runs`、`rl_test_inference`。
 

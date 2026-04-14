@@ -22,7 +22,7 @@ def run_conversation(
 ) -> Dict[str, Any]:
 ```
 
-六个参数，返回一个字典。但这个方法的实际复杂度远超签名所暗示的——在进入主循环之前，有一段长达 300 行的"入口仪式"，负责初始化会话状态、构建系统提示、执行入口预压缩。
+六个参数，返回一个字典。但这个方法的实际复杂度远超签名所暗示的——在进入主循环之前，有一段长达 300 行的"入口仪式"，负责初始化会话状态、构建System Prompt、执行入口预压缩。
 
 入口仪式的第一步是**环境防护**：
 
@@ -56,9 +56,9 @@ self._restore_primary_runtime()
 
 ---
 
-## 5.2 系统提示的缓存与重用
+## 5.2 System Prompt的缓存与重用
 
-系统提示的构建策略是 `run_conversation()` 中一个精心设计的优化点。核心原则是：**一次构建，整个会话复用**。
+System Prompt的构建策略是 `run_conversation()` 中一个精心设计的优化点。核心原则是：**一次构建，整个会话复用**。
 
 ```python
 # run_agent.py:7699-7738
@@ -80,11 +80,11 @@ if self._cached_system_prompt is None:
 
 这段代码的决策树：
 
-1. 如果系统提示已缓存（`_cached_system_prompt is not None`），跳过——什么都不做。
-2. 如果有会话历史且 SQLite 中存储了之前的系统提示，**直接复用**——不重新构建。
+1. 如果System Prompt已缓存（`_cached_system_prompt is not None`），跳过——什么都不做。
+2. 如果有会话历史且 SQLite 中存储了之前的System Prompt，**直接复用**——不重新构建。
 3. 否则，调用 `_build_system_prompt()` 从头构建，然后缓存。
 
-第二条规则是为 Gateway 模式设计的。Gateway 每条消息创建一个新 AIAgent，但同一个会话的系统提示应该保持不变——如果每次都重新构建，记忆内容可能发生变化（因为 Agent 自己会写入记忆），导致不同的系统提示，打破 Anthropic 的 prompt cache 前缀匹配。prompt caching 要求前缀完全一致才能命中缓存，这个经济效益在第 6 章详细分析。
+第二条规则是为 Gateway 模式设计的。Gateway 每条消息创建一个新 AIAgent，但同一个会话的System Prompt应该保持不变——如果每次都重新构建，记忆内容可能发生变化（因为 Agent 自己会写入记忆），导致不同的System Prompt，打破 Anthropic 的 prompt cache 前缀匹配。prompt caching 要求前缀完全一致才能命中缓存，这个经济效益在第 6 章详细分析。
 
 ---
 
@@ -118,7 +118,7 @@ if (
 
 为什么需要入口预压缩？考虑这个场景：用户从 Claude（200K 上下文）切换到一个只有 64K 上下文的本地模型，但会话历史已经积累了 150K tokens。如果不做入口预压缩，第一个 API 调用就会因为上下文溢出而失败——这是一个 4xx 错误，可能被错误分类为不可重试。
 
-入口预压缩最多执行 3 轮（`for _pass in range(3)`），因为每轮压缩只能消除"中间段"的消息——如果系统提示本身就超过了阈值，更多的压缩轮次也无济于事。
+入口预压缩最多执行 3 轮（`for _pass in range(3)`），因为每轮压缩只能消除"中间段"的消息——如果System Prompt本身就超过了阈值，更多的压缩轮次也无济于事。
 
 注意一个细微的副作用：压缩后 `conversation_history` 被设置为 `None`（第 7788 行），确保压缩后的消息被当作"全新的起点"写入 SQLite——否则 `_flush_messages_to_session_db` 会跳过已有的消息，导致压缩后的摘要消息丢失。
 
@@ -143,11 +143,11 @@ try:
     )
 ```
 
-插件返回的上下文被注入到**用户消息**中，而不是系统提示中。注释解释了为什么：
+插件返回的上下文被注入到**用户消息**中，而不是System Prompt中。注释解释了为什么：
 
 > Context is ALWAYS injected into the user message, never the system prompt. This preserves the prompt cache prefix.
 
-系统提示是 Hermes 的领地，插件贡献的上下文放在用户消息旁边。这个约束看起来是技术上的妥协，但它实现了一个重要的架构目标：系统提示在整个会话中保持稳定，最大化 prompt caching 的命中率。
+System Prompt是 Hermes 的领地，插件贡献的上下文放在用户消息旁边。这个约束看起来是技术上的妥协，但它实现了一个重要的架构目标：System Prompt在整个会话中保持稳定，最大化 prompt caching 的命中率。
 
 ---
 
@@ -469,7 +469,7 @@ run_conversation(user_message)
 │   ├── 重置重试计数器
 │   └── 创建新 IterationBudget
 │
-├── 2. 系统提示
+├── 2. System Prompt
 │   ├── 从 SQLite 加载已有提示 (Gateway 路径)
 │   └── 或 _build_system_prompt() 从头构建 (首轮)
 │
@@ -506,7 +506,7 @@ run_conversation(user_message)
 └── return { final_response, messages, api_calls, ... }
 ```
 
-这就是 Hermes Agent 的心跳——一个精心编排的循环，每次迭代都在"调用 LLM → 执行工具 → 注入结果"的闭环中推进任务。下一章将深入系统提示的构建（步骤 2），第 7 章将展开入口预压缩的内部算法（步骤 3），第 9 章将解析错误恢复和降级的完整策略。
+这就是 Hermes Agent 的心跳——一个精心编排的循环，每次迭代都在"调用 LLM → 执行工具 → 注入结果"的闭环中推进任务。下一章将深入System Prompt的构建（步骤 2），第 7 章将展开入口预压缩的内部算法（步骤 3），第 9 章将解析错误恢复和降级的完整策略。
 
 ---
 
@@ -515,7 +515,7 @@ run_conversation(user_message)
 | 文件 | 行号 | 角色 |
 |------|------|------|
 | `run_agent.py` | 7544 | `run_conversation()` 入口 |
-| `run_agent.py` | 7699-7738 | 系统提示缓存与重用 |
+| `run_agent.py` | 7699-7738 | System Prompt缓存与重用 |
 | `run_agent.py` | 7747-7796 | 入口预压缩 |
 | `run_agent.py` | 7866 | 主循环 while 条件 |
 | `run_agent.py` | 7931-7978 | 消息准备流水线 |

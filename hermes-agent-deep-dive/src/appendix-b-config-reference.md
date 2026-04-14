@@ -719,7 +719,7 @@ network:
 | `SUDO_PASSWORD` | sudo 密码（用于需要 root 权限的命令） |
 | `HERMES_MAX_ITERATIONS` | 每次对话的最大迭代数（默认 90） |
 | `HERMES_PREFILL_MESSAGES_FILE` | 预填消息 JSON 文件路径 |
-| `HERMES_EPHEMERAL_SYSTEM_PROMPT` | 临时系统提示（不持久化） |
+| `HERMES_EPHEMERAL_SYSTEM_PROMPT` | 临时System Prompt（不持久化） |
 
 ### `_EXTRA_ENV_KEYS` 中的平台凭据
 

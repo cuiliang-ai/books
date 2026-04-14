@@ -193,7 +193,7 @@ def has_traversal_component(path_str: str) -> bool:
 
 ## 26.4 Prompt 注入防御
 
-Hermes Agent 的系统提示由多个来源组装——身份描述、SOUL.md、.hermes.md 项目配置、MEMORY.md 记忆内容、Skill 索引。每个来源都是一个潜在的注入面——一个恶意的 `.hermes.md` 或被投毒的 MEMORY.md 可能包含"ignore all previous instructions"这样的 prompt injection 载荷。
+Hermes Agent 的System Prompt由多个来源组装——身份描述、SOUL.md、.hermes.md 项目配置、MEMORY.md 记忆内容、Skill 索引。每个来源都是一个潜在的注入面——一个恶意的 `.hermes.md` 或被投毒的 MEMORY.md 可能包含"ignore all previous instructions"这样的 prompt injection 载荷。
 
 `agent/prompt_builder.py` 为上下文文件提供第一道扫描：
 
@@ -263,9 +263,9 @@ _MEMORY_THREAT_PATTERNS = [
 ]
 ```
 
-记忆扫描增加了 `role_hijack` 模式（`"you are now ..."`），因为记忆内容直接注入系统提示，角色劫持攻击在这里更有效。扫描失败时，memory tool 直接拒绝写入并返回错误信息，解释为什么内容被阻止。
+记忆扫描增加了 `role_hijack` 模式（`"you are now ..."`），因为记忆内容直接注入System Prompt，角色劫持攻击在这里更有效。扫描失败时，memory tool 直接拒绝写入并返回错误信息，解释为什么内容被阻止。
 
-这两层注入防御的设计理念是**宁可误报也不漏报**。正则表达式匹配必然会有 false positive——比如一个讨论 prompt injection 防御的技术文档可能触发"ignore previous instructions"模式。但考虑到这些内容直接进入系统提示，误报的代价（用户需要修改措辞）远小于漏报的代价（Agent 被劫持）。
+这两层注入防御的设计理念是**宁可误报也不漏报**。正则表达式匹配必然会有 false positive——比如一个讨论 prompt injection 防御的技术文档可能触发"ignore previous instructions"模式。但考虑到这些内容直接进入System Prompt，误报的代价（用户需要修改措辞）远小于漏报的代价（Agent 被劫持）。
 
 ---
 
