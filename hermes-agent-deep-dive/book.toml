@@ -14,4 +14,3 @@ default-theme = "light"
 preferred-dark-theme = "coal"
 site-url = "/hermes-agent-deep-dive/"
 additional-css = ["custom.css"]
-additional-js = ["mermaid-init.js"]
