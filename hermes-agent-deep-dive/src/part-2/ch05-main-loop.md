@@ -58,80 +58,172 @@ self._restore_primary_runtime()
 
 ## 5.2 run_conversation() 全景图
 
-在逐段拆解之前，先建立一张全局地图。下图展示了 `run_conversation()` 的完整流程——从用户消息进入到最终响应返回，经过哪些阶段、每个阶段的核心操作是什么：
+在逐段拆解之前，先建立一张全局地图。点击下方的 **"播放流程"** 按钮观看 `run_conversation()` 的六阶段执行过程，或点击任意阶段方块查看详细说明：
 
-```mermaid
-flowchart TB
-    START(["run_conversation(user_message)"]) --> ENTRY
+<div class="rc-flow" id="rc-flow">
+  <div class="rc-flow-controls">
+    <button class="rc-play-btn" id="rc-play">▶ 播放流程</button>
+    <button id="rc-reset">重置</button>
+  </div>
+  <div class="rc-flow-body">
+    <div class="rc-flow-diagram">
+      <div class="rc-stage" data-stage="0">
+        <div class="rc-stage-title">① 入口仪式</div>
+        <div class="rc-stage-sub">_install_safe_stdio → IterationBudget</div>
+      </div>
+      <div class="rc-arrow" data-arrow="0">↓</div>
+      <div class="rc-stage" data-stage="1">
+        <div class="rc-stage-title">② System Prompt</div>
+        <div class="rc-stage-sub">缓存 / SQLite 恢复 / 从头构建</div>
+      </div>
+      <div class="rc-arrow" data-arrow="1">↓</div>
+      <div class="rc-stage" data-stage="2">
+        <div class="rc-stage-title">③ 入口预压缩</div>
+        <div class="rc-stage-sub">estimate_tokens → _compress_context × 3</div>
+      </div>
+      <div class="rc-arrow" data-arrow="2">↓</div>
+      <div class="rc-stage" data-stage="3">
+        <div class="rc-stage-title">④ 插件钩子</div>
+        <div class="rc-stage-sub">pre_llm_call → 注入用户消息</div>
+      </div>
+      <div class="rc-arrow" data-arrow="3">↓</div>
+      <div class="rc-stage rc-stage-loop" data-stage="4">
+        <div class="rc-stage-title">⑤ 主循环</div>
+        <div class="rc-stage-sub">LLM 调用 → 工具执行 → 结果注入</div>
+      </div>
+      <div class="rc-arrow" data-arrow="4">↓</div>
+      <div class="rc-stage" data-stage="5">
+        <div class="rc-stage-title">⑥ 后处理</div>
+        <div class="rc-stage-sub">记忆 · 轨迹 · 持久化 · 技能推送</div>
+      </div>
+    </div>
+    <div class="rc-flow-detail" id="rc-detail">
+      <div class="rc-detail-placeholder">← 点击阶段方块或播放流程查看详情</div>
+    </div>
+  </div>
+  <div class="rc-progress">
+    <div class="rc-progress-dot" data-dot="0"></div>
+    <div class="rc-progress-dot" data-dot="1"></div>
+    <div class="rc-progress-dot" data-dot="2"></div>
+    <div class="rc-progress-dot" data-dot="3"></div>
+    <div class="rc-progress-dot" data-dot="4"></div>
+    <div class="rc-progress-dot" data-dot="5"></div>
+  </div>
+</div>
 
-    subgraph ENTRY["① 入口仪式"]
-        direction TB
-        E1["_install_safe_stdio()"] --> E2["_restore_primary_runtime()"]
-        E2 --> E3["_sanitize_surrogates()"]
-        E3 --> E4["创建 IterationBudget"]
-    end
+<script>
+(function() {
+  var stages = [
+    {
+      title: '① 入口仪式',
+      section: '详见 §5.1',
+      text: '方法的前 300 行全是防御性初始化。<code>_install_safe_stdio()</code> 确保 stdout/stderr 不会因编码崩溃；<code>_restore_primary_runtime()</code> 将 fallback 模型恢复到主模型；<code>_sanitize_surrogates()</code> 清洗孤立代理字符。核心思想：<strong>不信任调用者的环境状态</strong>，每次进入都完整重置。',
+      funcs: ['_install_safe_stdio()', '_restore_primary_runtime()', '_sanitize_surrogates()', 'IterationBudget']
+    },
+    {
+      title: '② System Prompt',
+      section: '详见 §5.3 · 第 6 章',
+      text: 'System Prompt 构建成本高（7 层组装），采用"一次构建，整会话复用"策略。Gateway 模式下从 SQLite 恢复上次的 System Prompt，确保 Anthropic prompt cache 的前缀匹配命中。',
+      funcs: ['_build_system_prompt()', '_cached_system_prompt', 'SessionDB.get_session()']
+    },
+    {
+      title: '③ 入口预压缩',
+      section: '详见 §5.4 · 第 7 章',
+      text: '进入主循环前检查上下文长度。关键场景：用户从 200K 上下文的 Claude 切换到 64K 本地模型，会话历史已积累 150K tokens。预压缩最多 3 轮，防止首次 API 调用因上下文溢出返回 4xx 错误。',
+      funcs: ['estimate_request_tokens_rough()', '_compress_context()', 'threshold_tokens']
+    },
+    {
+      title: '④ 插件钩子',
+      section: '详见 §5.5',
+      text: '<code>pre_llm_call</code> 钩子让第三方插件注入额外上下文（RAG 检索结果、外部知识库）。关键约束：插件上下文注入到<strong>用户消息</strong>中而非 System Prompt——保护缓存前缀不被破坏。',
+      funcs: ['invoke_hook("pre_llm_call")', 'plugin_user_context']
+    },
+    {
+      title: '⑤ 主循环',
+      section: '详见 §5.6–5.12',
+      text: 'Agent 的核心心跳。每次迭代：中断检查 → 预算消耗 → 消息准备流水线 → API 调用（始终流式，90s 静默检测）→ 响应验证（三分支）→ finish_reason。工具调用则执行并注入结果；<code>stop</code> 则跳出。预算耗尽时注入"请总结"并允许一次恩典调用。',
+      funcs: ['_interruptible_streaming_api_call()', '_execute_tool_calls()', '_sanitize_api_messages()', 'iteration_budget']
+    },
+    {
+      title: '⑥ 后处理',
+      section: '详见 §5.14',
+      text: '循环结束后的清理和持久化。记忆刷新写入磁盘；轨迹保存写入 JSONL（供 RL 训练）；会话增量写入 SQLite；技能推送在工具密集轮次中提示创建 Skill。每一步都在为<strong>下一次会话</strong>做准备。',
+      funcs: ['_flush_messages_to_session_db()', 'save_trajectories', '_skill_nudge_interval']
+    }
+  ];
 
-    ENTRY --> SYSPROMPT
+  var current = -1;
+  var timer = null;
+  var playBtn = document.getElementById('rc-play');
+  var resetBtn = document.getElementById('rc-reset');
+  var detailEl = document.getElementById('rc-detail');
+  var stageEls = document.querySelectorAll('#rc-flow .rc-stage');
+  var arrowEls = document.querySelectorAll('#rc-flow .rc-arrow');
+  var dotEls = document.querySelectorAll('#rc-flow .rc-progress-dot');
 
-    subgraph SYSPROMPT["② System Prompt"]
-        direction TB
-        S1{"缓存存在?"}
-        S1 -- 是 --> S2["直接复用"]
-        S1 -- 否 --> S3{"SQLite 有记录?"}
-        S3 -- 是 --> S4["从 SessionDB 加载"]
-        S3 -- 否 --> S5["_build_system_prompt() 从头构建"]
-    end
+  function showStage(idx) {
+    current = idx;
+    stageEls.forEach(function(el, i) {
+      el.classList.toggle('active', i === idx);
+    });
+    arrowEls.forEach(function(el, i) {
+      el.classList.toggle('active', i === idx - 1 || i === idx);
+    });
+    dotEls.forEach(function(el, i) {
+      el.classList.remove('active', 'done');
+      if (i === idx) el.classList.add('active');
+      else if (i < idx) el.classList.add('done');
+    });
+    var s = stages[idx];
+    var funcsHtml = s.funcs.map(function(f) { return '<code>' + f + '</code>'; }).join('');
+    detailEl.innerHTML = '<div class="rc-detail-content">' +
+      '<h4>' + s.title + '</h4>' +
+      '<div class="rc-detail-section">' + s.section + '</div>' +
+      '<div class="rc-detail-text">' + s.text + '</div>' +
+      '<div class="rc-detail-funcs">' + funcsHtml + '</div>' +
+      '</div>';
+  }
 
-    SYSPROMPT --> PREFLIGHT
+  function resetAll() {
+    if (timer) { clearInterval(timer); timer = null; }
+    current = -1;
+    playBtn.disabled = false;
+    playBtn.textContent = '▶ 播放流程';
+    stageEls.forEach(function(el) { el.classList.remove('active'); });
+    arrowEls.forEach(function(el) { el.classList.remove('active'); });
+    dotEls.forEach(function(el) { el.classList.remove('active', 'done'); });
+    detailEl.innerHTML = '<div class="rc-detail-placeholder">← 点击阶段方块或播放流程查看详情</div>';
+  }
 
-    subgraph PREFLIGHT["③ 入口预压缩"]
-        direction TB
-        P1["estimate_request_tokens_rough()"] --> P2{"超过阈值?"}
-        P2 -- 是 --> P3["_compress_context() × 最多 3 轮"]
-        P2 -- 否 --> P4["跳过"]
-    end
+  playBtn.addEventListener('click', function() {
+    if (timer) return;
+    playBtn.disabled = true;
+    playBtn.textContent = '⏵ 播放中...';
+    var step = 0;
+    showStage(step);
+    timer = setInterval(function() {
+      step++;
+      if (step >= stages.length) {
+        clearInterval(timer);
+        timer = null;
+        playBtn.disabled = false;
+        playBtn.textContent = '▶ 重新播放';
+        return;
+      }
+      showStage(step);
+    }, 1800);
+  });
 
-    PREFLIGHT --> PLUGIN["④ 插件钩子 pre_llm_call"]
-    PLUGIN --> LOOP
+  resetBtn.addEventListener('click', resetAll);
 
-    subgraph LOOP["⑤ 主循环"]
-        direction TB
-        L1["中断检查 + 预算消耗"] --> L2["消息准备流水线"]
-        L2 --> L3["API 调用 · 始终流式"]
-        L3 --> L4["响应验证 · 三分支"]
-        L4 --> L5["finish_reason 提取"]
-        L5 --> L6{"tool_calls?"}
-        L6 -- 是 --> L7["_execute_tool_calls()"]
-        L7 --> L8["工具结果注入 messages"]
-        L8 --> L1
-        L6 -- 否/stop --> EXIT
-    end
-
-    EXIT["跳出循环"] --> POST
-
-    subgraph POST["⑥ 后处理"]
-        direction TB
-        O1["记忆刷新"] --> O2["轨迹保存"]
-        O2 --> O3["会话持久化 → SQLite"]
-        O3 --> O4["技能推送检查"]
-    end
-
-    POST --> RETURN(["return { final_response, messages, api_calls, ... }"])
-```
-
-### 各阶段简要讲解
-
-**① 入口仪式**（§5.1）— 方法的前 300 行全是防御性初始化。`_install_safe_stdio()` 确保 stdout/stderr 不会因为编码问题崩溃；`_restore_primary_runtime()` 将上一轮可能降级到的 fallback 模型恢复到主模型；`_sanitize_surrogates()` 清洗从富文本编辑器粘贴来的孤立代理字符。最后创建 `IterationBudget`——一个全局迭代预算计数器，跨所有 API 调用生效。核心思想：**不信任调用者的环境状态**，每次进入都完整重置。
-
-**② System Prompt**（§5.3）— System Prompt 的构建成本很高（涉及 7 层组装，详见第 6 章），所以采用"一次构建，整会话复用"策略。首次调用时构建并缓存在 `_cached_system_prompt`；Gateway 模式下，每条消息会创建新的 AIAgent 实例，此时直接从 SQLite 恢复上次构建的 System Prompt——不重新构建，既保持一致性，又确保 Anthropic prompt cache 的前缀匹配命中。
-
-**③ 入口预压缩**（§5.4）— 在进入主循环之前检查上下文长度。关键场景：用户从 200K 上下文的 Claude 切换到 64K 的本地模型，但会话历史已积累 150K tokens。如果不预压缩，第一个 API 调用就会因上下文溢出返回 4xx 错误。预压缩最多执行 3 轮 `_compress_context()`，将上下文压缩到阈值以内。
-
-**④ 插件钩子**（§5.5）— `pre_llm_call` 钩子让第三方插件注入额外上下文（如 RAG 检索结果、外部知识库内容）。关键约束：插件上下文注入到**用户消息**中，而非 System Prompt——这保护了 System Prompt 的缓存前缀不被破坏。
-
-**⑤ 主循环**（§5.6–5.12）— Agent 的核心心跳。每次迭代：检查中断标志 → 消耗迭代预算 → 消息准备流水线（记忆注入、字段清洗、prompt cache 断点）→ API 调用（始终流式，提供 90s 静默检测）→ 响应验证（按 api_mode 三分支）→ 提取 finish_reason。如果模型请求工具调用，执行工具并将结果注入消息列表，回到循环头；如果模型回复 `stop`，跳出循环。预算耗尽时会注入"请总结"的提示并允许一次恩典调用。
-
-**⑥ 后处理**（§5.14）— 循环结束后的清理和持久化。记忆刷新将内存中的记忆写入磁盘；轨迹保存将完整消息历史写入 JSONL（供 RL 训练使用）；会话持久化将消息增量写入 SQLite；技能推送检查在工具调用密集的轮次中提示 Agent 创建可复用 Skill。每一步都在为**下一次会话**做准备——这是自进化闭环的关键环节。
+  stageEls.forEach(function(el) {
+    el.addEventListener('click', function() {
+      if (timer) { clearInterval(timer); timer = null; playBtn.disabled = false; playBtn.textContent = '▶ 播放流程'; }
+      showStage(parseInt(el.dataset.stage));
+    });
+  });
+})();
+</script>
 
 ### 阶段速览表
 
@@ -144,7 +236,7 @@ flowchart TB
 | ⑤ 主循环 | LLM 调用 → 工具执行 → 结果注入 的迭代闭环 | §5.6–5.12 |
 | ⑥ 后处理 | 记忆、轨迹、持久化、技能推送 | §5.14 |
 
-> **阅读建议**：带着这张图和上面的讲解往下走。每一节展开上图中的一个方块，看完一节后可以回到这里确认"我在地图上的哪个位置"。
+> **阅读建议**：带着上面的交互图往下走。每一节展开图中的一个方块，看完一节后可以回到这里点击对应阶段确认"我在地图上的哪个位置"。
 
 ---
 
