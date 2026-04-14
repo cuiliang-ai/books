@@ -5,34 +5,54 @@
 
 ---
 
-## 19.1 第三种记忆形式
+## 19.1 Session Search 解决什么问题
 
-第 17 章的 Memory 系统提供了精炼的知识条目，第 18 章的 Skills 系统提供了程序化的操作指南。但有一类回忆需求这两者都无法满足：**原始对话回忆**。"上次我们调试那个 Docker 网络问题时，最后用了什么方案？""我之前让你给我做的那个脚本在哪里？""上周讨论的 API 设计最终定的是哪个方案？"
+第 17 章的 Memory 系统存储的是**精炼的知识条目**——"用户偏好 Python 类型注解"。第 18 章的 Skills 系统存储的是**程序化操作指南**——"如何用 Axolotl 微调一个 7B 模型"。但有一类回忆需求这两者都无法满足：**原始对话回忆**。
 
-这些问题需要搜索具体的对话历史——不是提炼后的知识，而是原始的对话记录。Session Search 工具就是为此设计的。它构建在第 16 章的 SessionDB 之上，利用 FTS5 全文索引快速定位相关会话，然后用辅助 LLM（Gemini Flash 等轻量模型）生成聚焦的摘要，将长对话压缩成可以注入上下文窗口的精炼回忆。
+| 场景 | 用户问的 | Memory 能答？ | Skills 能答？ | Session Search？ |
+|------|---------|-------------|-------------|----------------|
+| 1 | "上次调试 Docker 网络问题用了什么方案？" | ✗ 只有偏好 | ✗ 只有通用步骤 | ✓ 找到那次对话的完整方案 |
+| 2 | "之前让你写的那个脚本在哪里？" | ✗ 不存路径 | ✗ 不存具体文件 | ✓ 定位那次会话、摘要关键信息 |
+| 3 | "上周 API 设计最终定的是哪个方案？" | ✗ 太细节 | ✗ 不是操作指南 | ✓ 搜索历史对话、生成聚焦回忆 |
 
-```python
-# tools/session_search_tool.py:1-16
-"""
-Session Search Tool - Long-Term Conversation Recall
+Session Search 是 Hermes 的**第三种记忆形式**。它构建在第 16 章的 SessionDB 之上，利用 FTS5 全文索引快速定位相关会话，然后用辅助 LLM（Gemini Flash 等轻量模型）生成聚焦的摘要，将长对话压缩成可以注入上下文窗口的精炼回忆。
 
-Searches past session transcripts in SQLite via FTS5, then summarizes the
-top matching sessions using a cheap/fast model (same pattern as web_extract).
-Returns focused summaries of past conversations rather than raw transcripts,
-keeping the main model's context window clean.
+核心架构是一条五步管道：
 
-Flow:
-  1. FTS5 search finds matching messages ranked by relevance
-  2. Groups by session, takes the top N unique sessions (default 3)
-  3. Loads each session's conversation, truncates to ~100k chars
-  4. Sends to Gemini Flash with a focused summarization prompt
-  5. Returns per-session summaries with metadata
-"""
+```
+用户提问 "上次怎么解决 CORS 的？"
+    │
+    ▼
+① FTS5 MATCH "CORS"  ──  毫秒级定位匹配消息（最多50条）
+    │
+    ▼
+② 委派链解析 + 去重  ──  子会话→根会话，去重到会话级别
+    │
+    ▼
+③ 加载 + 截断  ──  格式化完整对话，以匹配点为中心截断到100K字符
+    │
+    ▼
+④ 并行 LLM 摘要  ──  asyncio.gather 并行发送给辅助模型
+    │
+    ▼
+⑤ 结构化返回  ──  [{session_id, when, source, summary}, ...]
 ```
 
-这个五步流程是 Session Search 的架构核心。它不是把原始对话塞进上下文窗口（那会消耗大量 token），而是通过"搜索 → 摘要 → 注入"的三步管道，将历史对话变成紧凑的回忆片段。
+这个管道的关键洞察是**不把原始对话塞进上下文窗口**。一次历史对话可能有几万 token，直接注入会挤占当前任务的空间。通过"搜索 → 摘要 → 注入"的三步转换，Session Search 将长对话压缩为几百 token 的精炼回忆。
+
+### 本章结构
+
+| 部分 | 节 | 内容 | 重要度 |
+|------|-----|------|--------|
+| **一、核心：搜索与摘要管道** | §19.2–19.5 | 两种模式 → FTS5 搜索 → 截断 → LLM 摘要 | ⭐⭐⭐ 必读 |
+| **二、工程：并行化与 Schema** | §19.6–19.7 | 并行摘要生成 → 工具 Schema 与行为引导 | ⭐⭐ 理解系统如何被调用 |
+| **三、连接：跨章协作** | §19.8 | 与 SessionDB、Memory、Skills 的协作 | ⭐ 按需查阅 |
 
 ---
+
+# 一、核心：搜索与摘要管道
+
+> 这部分回答三个问题：Session Search 有几种模式？FTS5 搜索后如何处理委派链和当前会话？100K 字符的对话怎么压缩成有用的摘要？
 
 ## 19.2 两种搜索模式
 
@@ -138,6 +158,8 @@ for result in raw_results:
 
 ## 19.4 对话格式化与截断
 
+> 确定了目标会话后，需要将对话历史转换为可摘要的文本。这里有两个关键操作：格式化和截断。
+
 确定了目标会话后，下一步是加载每个会话的完整对话历史并格式化为可摘要的文本。`_format_conversation` 将消息列表转换为人类可读的 transcript：
 
 ```python
@@ -210,6 +232,8 @@ def _truncate_around_matches(
 
 ## 19.5 LLM 辅助摘要
 
+> 这是 Session Search 区别于普通全文搜索的关键——不返回原始结果，而是用 LLM 生成"可操作的回忆"。
+
 截断后的对话被发送给辅助 LLM（通过 `agent/auxiliary_client.py` 的 `async_call_llm`）生成聚焦摘要。摘要的 system prompt 明确指导模型关注五个维度：
 
 ```python
@@ -262,6 +286,10 @@ async def _summarize_session(
 `temperature=0.1` 确保摘要的一致性——对于事实性回忆，不需要创造性。`MAX_SUMMARY_TOKENS = 10000` 允许生成足够详细的摘要。
 
 ---
+
+# 二、工程：并行化与 Schema
+
+> 核心管道已经清晰了。这部分关注两个工程问题：多会话摘要如何并行？工具 Schema 如何引导 Agent 正确使用 Session Search？
 
 ## 19.6 并行摘要生成
 
@@ -354,45 +382,11 @@ Schema 中有一个关键的搜索语法建议：使用 `OR` 而非默认的 `AN
 
 ---
 
-## 19.8 完整的召回流程
+# 三、连接：跨章协作
 
-综合以上各节，Session Search 的完整数据流如下：
+> Session Search 不是独立存在的——它是 Part 4 四大子系统协作的关键节点。这部分可按需查阅。
 
-```
-用户提问 "上次我们怎么解决那个 CORS 问题的？"
-    │
-    ▼
-Agent 调用 session_search(query="CORS")
-    │
-    ▼
-SessionDB.search_messages() — FTS5 MATCH "CORS"
-    │ 返回最多 50 条匹配消息（按 BM25 排名）
-    ▼
-_resolve_to_parent() — 将子会话/委派会话映射到根会话
-    │
-    ▼
-去重到会话级别，排除当前会话谱系，取前 N 个
-    │
-    ▼
-对每个匹配会话：
-    ├─ db.get_messages_as_conversation() — 加载完整对话
-    ├─ _format_conversation() — 格式化为 transcript
-    └─ _truncate_around_matches() — 以匹配点为中心截断到 100K 字符
-    │
-    ▼
-asyncio.gather() — 并行发送给辅助 LLM
-    │ system prompt: "Summarize with focus on CORS"
-    │ temperature: 0.1, max_tokens: 10000
-    ▼
-返回结构化结果：
-    [{session_id, when, source, model, summary}, ...]
-```
-
-这个流程中，FTS5 负责速度（毫秒级在全部历史消息中定位匹配），LLM 负责质量（将长对话压缩为聚焦的回忆）。两者的分工使得 Session Search 既快又准——FTS5 过滤掉 99% 的无关会话，LLM 只处理少数几个最相关的。
-
----
-
-## 19.9 与其他章节的连接
+## 19.8 与其他章节的连接
 
 Session Search 构建在第 16 章的 SessionDB 之上——它直接调用 `search_messages()` 和 `get_messages_as_conversation()`，利用 FTS5 索引和 WAL 并发读取能力。FTS5 查询净化（`_sanitize_fts5_query`，第 16.7 节）确保了用户输入不会导致搜索崩溃。
 
