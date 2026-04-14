@@ -1,80 +1,699 @@
 
 # 第 3 章：十分钟心智模型
 
-> **核心问题**：一张总图能否建立对 Hermes Agent 的全局认知？从用户输入到 Agent 响应，数据如何流动？
+## 为什么需要一张地图
+
+前两章分别介绍了 Hermes Agent 的设计哲学和六种入口点。你现在知道它是什么、能从哪进去——但还不知道**里面长什么样**。
+
+本章的目标很简单：用一个完整的端到端请求，把 Hermes Agent 的所有核心模块串起来。读完之后，你应该能回答这个问题——"用户说了一句话，Agent 回了一段答复，中间到底发生了什么？"
+
+不是概念图。是真实代码路径。
 
 ---
 
-## 3.1 全局架构图
+## 全局架构：五层蛋糕
+
+在追踪具体请求之前，先建立 Hermes Agent 的分层认知。整个系统可以从上到下切成五层：
 
 ```
-用户输入
-  ↓
-┌─────────────────────────────────────────────────┐
-│              入口层 (Entry Points)                │
-│  CLI / Gateway / ACP / Batch / MCP / RL          │
-└──────────────────────┬──────────────────────────┘
-                       ↓
-┌─────────────────────────────────────────────────┐
-│           AIAgent.run_conversation()             │
-│  ┌─────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ Prompt   │  │ Context  │  │ Credential    │  │
-│  │ Builder  │  │ Engine   │  │ Pool          │  │
-│  └─────────┘  └──────────┘  └───────────────┘  │
-│         ↓          ↓              ↓              │
-│  ┌─────────────────────────────────────────┐    │
-│  │         LLM API (多模型)                 │    │
-│  └─────────────────────────────────────────┘    │
-│         ↓                                        │
-│  ┌─────────────────────────────────────────┐    │
-│  │    Tool Registry → 40+ Tools            │    │
-│  │    Terminal / File / Web / Browser / MCP │    │
-│  └─────────────────────────────────────────┘    │
-│         ↓                                        │
-│  ┌─────────────────────────────────────────┐    │
-│  │    Learning Loop                         │    │
-│  │    Skills ↔ Memory ↔ Session Search      │    │
-│  └─────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────┘
-                       ↓
-              Agent 响应 → 用户
+┌─────────────────────────────────────────────────────────────────┐
+│  第 1 层 · 入口适配层                                            │
+│  CLI (cli.py) / Gateway (gateway/run.py) / ACP / Batch / MCP / RL│
+├─────────────────────────────────────────────────────────────────┤
+│  第 2 层 · 智能体引擎                                            │
+│  AIAgent.run_conversation()  —  run_agent.py:7544               │
+│  ┌──────────────┐ ┌──────────────┐ ┌────────────────────────┐   │
+│  │PromptBuilder │ │ContextEngine │ │ CredentialPool         │   │
+│  │(prompt_       │ │(context_     │ │ + SmartRouting         │   │
+│  │ builder.py)  │ │ compressor.py)│ │ (credential_pool.py)  │   │
+│  └──────────────┘ └──────────────┘ └────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────┤
+│  第 3 层 · 工具编排层                                            │
+│  model_tools.py → tools/registry.py → 各 tools/*.py             │
+│  Toolset 定义 (toolsets.py)  ·  工具发现 (_discover_tools)       │
+├─────────────────────────────────────────────────────────────────┤
+│  第 4 层 · 执行后端层                                            │
+│  Terminal (local/docker/ssh/modal/daytona/singularity)           │
+│  Browser (Playwright/Browserbase)  ·  Web (Exa/Firecrawl)       │
+│  File I/O  ·  MCP Client  ·  Code Execution (UDS RPC)           │
+├─────────────────────────────────────────────────────────────────┤
+│  第 5 层 · 持久化与学习层                                         │
+│  SessionDB (hermes_state.py · SQLite+FTS5)                       │
+│  Memory (MEMORY.md / USER.md)  ·  Skills (skills/*.SKILL.md)    │
+│  Memory Plugins (Honcho/mem0/Holographic/...)                    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
----
+五层之间的调用方向是**严格单向的**——上层调用下层，下层不回调上层。唯一的例外是回调函数：`AIAgent` 通过 `tool_progress_callback`、`clarify_callback`、`stream_delta_callback` 等可调用对象把状态反馈给入口层。但这些回调是在 `__init__` 时注入的，不是下层反过来 import 上层。
 
-## 3.2 一次请求的完整数据流
-
-- 源锚：`run_agent.py` — `AIAgent.run_conversation()`
-
-> TODO: 从用户输入到最终响应的完整时序图
+理解这个分层就够了。下面用一个真实请求把它走通。
 
 ---
 
-## 3.3 核心概念速览
+## 一次请求的完整旅程
 
-| 概念 | 对应模块 | 一句话说明 |
-|------|---------|-----------|
-| Agentic Loop | `run_agent.py` | 迭代推理-执行循环 |
-| Tool Registry | `tools/registry.py` | 工具的注册与发现 |
-| Context Engine | `agent/context_engine.py` | 上下文压缩与管理 |
-| Learning Loop | Skills + Memory + Session | 自我进化闭环 |
-| Gateway | `gateway/run.py` | 多平台消息路由 |
+场景：用户在 CLI 中输入一句话："查看当前目录下有哪些 Python 文件"。
+
+这个请求会触发 LLM 推理 → 调用终端工具 → 返回结果 → LLM 总结。我们逐阶段追踪。
+
+### 阶段零：消息进入适配层
+
+用户在 prompt_toolkit 的输入框中按下回车。`HermesCLI` 捕获输入，判断它不是 Slash 命令（不以 `/` 开头），于是走聊天路径：
+
+```python
+# cli.py 中的伪代码路径
+user_input = session.prompt(...)   # prompt_toolkit 交互式输入
+if user_input.startswith("/"):
+    self.process_command(user_input)
+else:
+    result = self.agent.run_conversation(
+        user_message=user_input,
+        conversation_history=self.messages,
+        task_id=self.task_id,
+    )
+```
+
+注意三个参数：
+
+- **`user_message`**：用户的原始文本
+- **`conversation_history`**：CLI 维护的完整消息列表（上一轮的 user → assistant → tool → assistant...）
+- **`task_id`**：用于隔离终端后端的唯一 ID
+
+如果这是 Gateway 入口而不是 CLI，路径类似但细节不同——`GatewayRunner` 会从 Telegram 的 `update.message.text` 中提取文本，查找或创建 `AIAgent` 实例，然后调用同一个 `run_conversation()`。入口不同，终点相同。
+
+### 阶段一：系统提示组装
+
+`run_conversation()` 的第一件大事是检查缓存的系统提示。如果这是**新会话的第一轮**，它调用 `_build_system_prompt()` 从七个层次组装完整的系统提示：
+
+```python
+# run_agent.py:3057 — _build_system_prompt()
+# 七层组装，按序拼接：
+
+# 1. 身份层 — SOUL.md（如果存在）或 DEFAULT_AGENT_IDENTITY
+prompt_parts = [load_soul_md() or DEFAULT_AGENT_IDENTITY]
+
+# 2. 工具行为指导 — 只在对应工具加载时注入
+if "memory" in self.valid_tool_names:
+    prompt_parts.append(MEMORY_GUIDANCE)
+if "session_search" in self.valid_tool_names:
+    prompt_parts.append(SESSION_SEARCH_GUIDANCE)
+if "skill_manage" in self.valid_tool_names:
+    prompt_parts.append(SKILLS_GUIDANCE)
+
+# 3. 用户/网关自定义系统消息
+if system_message is not None:
+    prompt_parts.append(system_message)
+
+# 4. 持久记忆 — MEMORY.md + USER.md 的冻结快照
+if self._memory_store:
+    mem_block = self._memory_store.format_for_system_prompt("memory")
+    user_block = self._memory_store.format_for_system_prompt("user")
+
+# 5. Skills 索引 — Tier 1 摘要（标题+一句话描述）
+skills_prompt = build_skills_system_prompt(
+    available_tools=self.valid_tool_names,
+    available_toolsets=avail_toolsets,
+)
+
+# 6. 上下文文件 — AGENTS.md / .cursorrules / HERMES.md
+context_files_prompt = build_context_files_prompt(cwd=_context_cwd, skip_soul=_soul_loaded)
+
+# 7. 元数据 — 当前日期时间、模型名、平台提示
+prompt_parts.append(f"Conversation started: {now.strftime(...)}")
+prompt_parts.append(PLATFORM_HINTS.get(platform_key, ""))
+
+return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
+```
+
+**关键设计决策**：系统提示在整个会话期间**只构建一次**，然后缓存在 `self._cached_system_prompt`。后续轮次直接复用，不重新构建。这不是性能优化——它是为了保持 Anthropic 的 **prompt caching** 命中率。如果每轮都重新构建系统提示（比如因为 MEMORY.md 内容变了），cache prefix 就会变化，之前缓存的 KV 对就全部失效。
+
+如果这是**继续会话**（Gateway 模式下每条消息创建新的 `AIAgent` 实例），系统提示从 SessionDB 中恢复而不是重新构建——同样是为了 cache 一致性。
+
+一个安全细节值得注意：`prompt_builder.py:55` 在加载上下文文件前执行 **注入检测扫描**：
+
+```python
+# agent/prompt_builder.py:36-47
+_CONTEXT_THREAT_PATTERNS = [
+    (r'ignore\s+(previous|all|above|prior)\s+instructions', "prompt_injection"),
+    (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
+    (r'system\s+prompt\s+override', "sys_prompt_override"),
+    (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_curl"),
+    (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass)', "read_secrets"),
+    # ...
+]
+```
+
+如果你的 AGENTS.md 包含 "ignore previous instructions"，它会被 **整个文件直接拦截**，替换为 `[BLOCKED: AGENTS.md contained potential prompt injection]`。这是第 26 章安全纵深的一部分，但在请求数据流中已经起作用了。
+
+### 阶段二：迭代预算与进入主循环
+
+系统提示就绪后，`run_conversation()` 创建迭代预算并进入主循环：
+
+```python
+# run_agent.py:7635
+self.iteration_budget = IterationBudget(self.max_iterations)  # 默认 90
+
+# run_agent.py:7866 — 主循环
+while (api_call_count < self.max_iterations
+       and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+    
+    if self._interrupt_requested:  # 用户发了新消息 → 中断当前循环
+        break
+    
+    api_call_count += 1
+    if not self.iteration_budget.consume():  # 线程安全的计数器
+        break
+    
+    # ... 准备消息 → 调用 API → 处理响应
+```
+
+`IterationBudget`（`run_agent.py:170`）是一个带锁的计数器。为什么需要线程安全？因为子 Agent（通过 `delegate_task`）可能在工作线程中消费自己的预算——虽然每个子 Agent 有独立的 `IterationBudget`，但 `consume()` 的原子性仍然重要。
+
+默认 90 次迭代。这个数字意味着：在一次 `run_conversation()` 调用中，Agent 最多可以做 90 轮"推理 → 工具调用"。对于"查看当前目录有哪些 Python 文件"这种简单任务，通常只需要 2 轮——第一轮调用终端工具执行 `find`，第二轮总结结果。但对于复杂任务（"帮我把这个项目从 Express 迁移到 Fastify"），90 轮可能刚好够用。
+
+### 阶段三：消息准备与 API 调用
+
+每一轮循环的核心是准备 `api_messages` 并发送给 LLM。准备过程涉及几个细微但重要的处理：
+
+```python
+# run_agent.py:7931-7978
+api_messages = []
+for idx, msg in enumerate(messages):
+    api_msg = msg.copy()
+    
+    # 1. 在当前轮的 user 消息中注入记忆上下文
+    if idx == current_turn_user_idx and msg.get("role") == "user":
+        if _ext_prefetch_cache:  # 外部记忆插件预取结果
+            api_msg["content"] = _base + "\n\n" + build_memory_context_block(...)
+    
+    # 2. 处理推理字段 — reasoning → reasoning_content
+    if msg.get("role") == "assistant":
+        reasoning_text = msg.get("reasoning")
+        if reasoning_text:
+            api_msg["reasoning_content"] = reasoning_text
+    
+    # 3. 清理内部字段 — reasoning, finish_reason, _thinking_prefill
+    api_msg.pop("reasoning", None)
+    api_msg.pop("finish_reason", None)
+    api_msg.pop("_thinking_prefill", None)
+    
+    api_messages.append(api_msg)
+
+# 4. 系统提示放在最前面
+api_messages = [{"role": "system", "content": effective_system}] + api_messages
+
+# 5. Anthropic prompt caching — 给系统提示和最近 3 条消息加 cache_control
+if self._use_prompt_caching:
+    api_messages = apply_anthropic_cache_control(api_messages, ...)
+
+# 6. 安全网 — 修复孤儿 tool_call/tool_result 对
+api_messages = self._sanitize_api_messages(api_messages)
+```
+
+这里有一个容易忽略的设计选择：**外部记忆上下文注入到 user 消息中，不注入到系统提示中**。注释解释了原因："system prompt modifications break the prompt cache prefix"。如果每轮都往系统提示里加新内容，Anthropic 的 prefix cache 就会每轮失效。所以 Hermes 选择把动态内容放进 user 消息——这保持了系统提示的稳定性，代价是用户消息变长了一点。
+
+准备完消息后，发起 API 调用：
+
+```python
+# run_agent.py:8093-8157
+while retry_count < max_retries:  # 最多重试 3 次
+    api_kwargs = self._build_api_kwargs(api_messages)
+    
+    # 始终优先使用流式调用 — 即使没有 stream 消费者
+    # 原因：流式路径提供 90 秒无数据超时检测
+    response = self._interruptible_streaming_api_call(
+        api_kwargs, on_first_delta=_stop_spinner
+    )
+```
+
+为什么"始终流式"？注释写得很直白（`run_agent.py:8124-8133`）：非流式路径在 provider 保持连接活跃但不发送数据时会**无限挂起**。流式路径有 90 秒的 stale-stream 检测和 60 秒的读超时，能在 provider 假死时及时失败。这是从实际部署中发现的问题——子 Agent 和 Gateway 模式下尤其容易触发。
+
+### 阶段四：响应解析——有工具调用还是最终回复？
+
+API 返回后，Agent 面临关键分支——模型返回了工具调用，还是纯文本回复？
+
+```
+LLM 响应
+   ↓
+有 tool_calls？──是──→ 进入阶段五（工具执行）
+   ↓
+  否
+   ↓
+纯文本回复──→ 这就是最终响应，退出循环
+```
+
+对于我们的例子——"查看当前目录下有哪些 Python 文件"——模型几乎肯定会在第一轮返回一个 `terminal` 工具调用，大概像这样：
+
+```json
+{
+  "tool_calls": [{
+    "id": "call_abc123",
+    "function": {
+      "name": "terminal",
+      "arguments": "{\"command\": \"find . -name '*.py' -type f\"}"
+    }
+  }]
+}
+```
+
+### 阶段五：工具编排——从名字到执行
+
+当模型返回工具调用时，`run_conversation()` 为每个 `tool_call` 执行分发。调用链是：
+
+```
+run_conversation()
+    ↓  遍历 response.tool_calls
+handle_function_call()          ← model_tools.py:459
+    ↓  参数类型强制转换
+coerce_tool_args()              ← 把 "42" 转为 int 42
+    ↓  插件前置钩子
+invoke_hook("pre_tool_call")
+    ↓
+registry.dispatch()             ← tools/registry.py
+    ↓  查找 ToolEntry
+entry.handler(function_args)    ← 实际工具函数
+    ↓  插件后置钩子
+invoke_hook("post_tool_call")
+    ↓
+返回 JSON 字符串结果
+```
+
+这个链条的关键节点是 `tools/registry.py` 的 `ToolRegistry`。每个工具在 import 时自注册：
+
+```python
+# tools/terminal_tool.py（简化）
+from tools.registry import registry
+
+def terminal_handler(command, timeout=120, task_id=None, **kwargs):
+    env = get_active_env(task_id)  # 选择 Local/Docker/SSH/Modal/...
+    return env.execute(command, timeout=timeout)
+
+registry.register(
+    name="terminal",
+    toolset="terminal",
+    schema={"name": "terminal", "description": "Execute commands", ...},
+    handler=terminal_handler,
+)
+```
+
+`registry.register()` 在模块级执行——也就是说，当 `model_tools.py` import `tools.terminal_tool` 时，注册就发生了。这是 Hermes 的 "import-time registration" 模式：
+
+```python
+# model_tools.py:132-170
+def _discover_tools():
+    """Import all tool modules to trigger their registry.register() calls."""
+    _modules = [
+        "tools.web_tools",
+        "tools.terminal_tool",
+        "tools.file_tools",
+        "tools.browser_tool",
+        "tools.skills_tool",
+        "tools.memory_tool",
+        "tools.session_search_tool",
+        "tools.delegate_tool",
+        "tools.mcp_tool",
+        # ... 20 个模块
+    ]
+    for mod_name in _modules:
+        try:
+            importlib.import_module(mod_name)
+        except Exception as e:
+            logger.warning("Could not import tool module %s: %s", mod_name, e)
+
+_discover_tools()  # 模块级执行——import model_tools 就触发全部工具注册
+```
+
+注意异常处理——如果某个工具的可选依赖没装（比如 `fal_client`），它只是打一条 warning，不影响其他工具。这是"优雅降级"的设计：系统的能力集合取决于安装了哪些依赖，而不是写死在代码里。
+
+对于我们的 `terminal` 工具调用，`terminal_handler` 会通过 `get_active_env(task_id)` 获取当前终端后端——如果用户没有配置，默认是 `LocalEnvironment`，它直接用 `subprocess` 执行命令。结果是 `find . -name '*.py' -type f` 的输出文本。
+
+### 阶段六：工具结果回注消息列表
+
+工具执行完毕后，结果被包装成 `tool` 角色的消息追加到会话历史：
+
+```python
+# run_agent.py:7316-7319（简化）
+tool_msg = {
+    "role": "tool",
+    "content": function_result,       # "file1.py\nfile2.py\nutils/helper.py\n..."
+    "tool_call_id": tool_call.id      # "call_abc123" — 与 assistant 消息中的 id 对应
+}
+messages.append(tool_msg)
+```
+
+然后循环继续——带着更新后的消息列表（包含 tool result）再次调用 LLM API。这一次，模型看到了命令的输出结果，它不再需要调用工具，而是生成一段自然语言总结：
+
+> "当前目录下共有 12 个 Python 文件，分布在 3 个子目录中..."
+
+这是一个**纯文本响应**——没有 `tool_calls`。`run_conversation()` 走到终止分支：
+
+```python
+# run_agent.py:9886-9888
+else:
+    # No tool calls - this is the final response
+    final_response = assistant_message.content or ""
+```
+
+循环结束。
+
+### 阶段七：会话持久化与返回
+
+退出主循环后，`run_conversation()` 执行收尾工作：
+
+1. **会话保存** — 将完整消息历史写入 SessionDB（SQLite）
+2. **轨迹保存** — 如果 `save_trajectories=True`（batch_runner 模式），保存为 JSONL 训练格式
+3. **记忆推送** — 如果达到推送间隔，注入记忆和 Skill 复习提示
+4. **使用统计** — 计算 token 消费和估算成本
+5. **插件钩子** — 触发 `post_conversation` 钩子
+
+最终返回一个字典：
+
+```python
+return {
+    "final_response": final_response,
+    "messages": messages,      # 完整会话历史
+    "usage": usage_data,       # token 消费统计
+    "session_id": self.session_id,
+}
+```
+
+`HermesCLI` 收到这个字典后，用 Rich 把 `final_response` 渲染到终端——Markdown 格式、代码高亮、表格渲染。用户看到的就是那段"当前目录下共有 12 个 Python 文件"的回复。
 
 ---
 
-## 3.4 模块依赖关系
+## 画成一张图
 
-- 源锚：`AGENTS.md` — 项目架构描述
+把上面七个阶段压缩成一张时序图：
 
-> TODO: 模块间依赖关系图
+```
+用户输入: "查看当前目录下有哪些 Python 文件"
+  │
+  ├──① HermesCLI 捕获输入
+  │     └──▶ agent.run_conversation(user_message, history, task_id)
+  │
+  ├──② _build_system_prompt() 构建/复用系统提示
+  │     ├── SOUL.md / DEFAULT_AGENT_IDENTITY
+  │     ├── MEMORY_GUIDANCE / SKILLS_GUIDANCE
+  │     ├── MEMORY.md + USER.md 快照
+  │     ├── Skills Tier-1 索引
+  │     ├── AGENTS.md（注入扫描后）
+  │     └── 日期 + 平台提示
+  │
+  ├──③ 进入 while 循环 (budget=90, api_call=0)
+  │     ├── 组装 api_messages (system + history + user)
+  │     ├── apply_anthropic_cache_control()
+  │     └── _interruptible_streaming_api_call(api_kwargs)
+  │
+  ├──④ LLM 返回: tool_calls=[{name:"terminal", args:{command:"find..."}}]
+  │
+  ├──⑤ handle_function_call("terminal", {command:"find..."})
+  │     ├── coerce_tool_args()
+  │     ├── registry.dispatch() → terminal_handler()
+  │     ├── LocalEnvironment.execute("find . -name '*.py' -type f")
+  │     └── 返回: "file1.py\nfile2.py\n..."
+  │
+  ├──⑥ 追加 tool result → messages
+  │     └── {"role":"tool", "content":"file1.py\n...", "tool_call_id":"call_abc123"}
+  │
+  ├──③' 再次 API 调用 (api_call=2)
+  │
+  ├──④' LLM 返回: 纯文本 "当前目录下共有 12 个 Python 文件..."
+  │
+  └──⑦ 保存会话 → SessionDB
+        返回 {final_response, messages, usage}
+```
+
+两轮 API 调用，一次工具执行。这就是一个简单请求的完整生命周期。
+
+---
+
+## 当事情变复杂：多工具、并行、中断
+
+上面的例子是最简单的路径。实际运行中，有几个复杂度维度会改变数据流。
+
+### 并行工具执行
+
+当模型在一次响应中返回多个工具调用时，Hermes 会尝试并行执行。但不是所有工具都能并行——`run_agent.py:219-231` 定义了两个关键集合：
+
+```python
+# 绝不并行的工具（需要用户交互）
+_NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
+
+# 安全并行的只读工具
+_PARALLEL_SAFE_TOOLS = frozenset({
+    "read_file", "search_files", "session_search",
+    "skill_view", "skills_list", "vision_analyze",
+    "web_extract", "web_search",
+    # ...
+})
+
+_MAX_TOOL_WORKERS = 8  # 最大并发线程数
+```
+
+如果一批工具调用全在 `_PARALLEL_SAFE_TOOLS` 中，它们通过 `ThreadPoolExecutor` 并行执行。如果其中任何一个在 `_NEVER_PARALLEL_TOOLS` 中，整批退回串行。
+
+### 上下文压缩
+
+当消息历史超过模型上下文窗口的阈值时（`run_agent.py:7740`），`ContextCompressor` 介入：
+
+```python
+# 预检压缩 — 在进入主循环前就检查
+_preflight_tokens = estimate_request_tokens_rough(
+    messages, system_prompt=active_system_prompt, tools=self.tools
+)
+if _preflight_tokens >= self.context_compressor.threshold_tokens:
+    messages, active_system_prompt = self._compress_context(messages, ...)
+```
+
+压缩策略是**迭代式摘要**——保留最前面的 N 条和最后面的 M 条消息不动，把中间的消息用辅助模型（通常是更便宜的模型）摘要为一条。这可能触发新会话创建——摘要后的消息作为新会话的起点，旧会话标记为已压缩。
+
+### 中断机制
+
+在 Gateway 模式下，用户可能在 Agent 执行工具时发了一条新消息。`run_agent.py:7871` 检查中断标志：
+
+```python
+if self._interrupt_requested:
+    interrupted = True
+    break
+```
+
+`_interrupt_requested` 由外部线程设置——Gateway 的消息接收循环在检测到同一会话的新消息时，调用 `agent.interrupt()`。这让正在执行长命令（比如 `npm install`）的 Agent 可以优雅地中断，转而处理新消息。
+
+### Fallback 链
+
+如果 API 调用失败（provider 宕机、429 限流、模型不可用），`run_agent.py` 会尝试切换到 fallback 模型：
+
+```python
+if self._fallback_chain:
+    if self._try_activate_fallback():
+        continue  # 用新模型重试
+```
+
+`_fallback_chain` 从 `credential_pool.py` 的 `fallback_providers` 配置中构建。这意味着你可以配置"主用 Claude，备用 GPT，再备用 DeepSeek"的降级链——对 Gateway 这种需要 7×24 可用的服务特别有价值。
+
+---
+
+## 依赖链：谁 import 谁
+
+代码级的模块依赖关系决定了构建和理解系统的顺序。`AGENTS.md` 给出了规范描述：
+
+```
+tools/registry.py  (无依赖 — 被所有工具文件 import)
+       ↑
+tools/*.py  (每个文件在 import 时调用 registry.register())
+       ↑
+model_tools.py  (import tools/registry + 触发工具发现)
+       ↑
+run_agent.py, cli.py, batch_runner.py, environments/
+```
+
+几个关键点：
+
+1. **`tools/registry.py` 是零依赖的**。它不 import `model_tools`，不 import 任何工具文件。这打破了潜在的循环依赖——工具文件可以安全地 `from tools.registry import registry`。
+
+2. **工具注册发生在 import 时**。当 `model_tools.py` 的 `_discover_tools()` import `tools.terminal_tool`，该模块的 `registry.register()` 调用在模块级执行。注册完成后，`registry` 就知道这个工具的 schema、handler、toolset 归属。
+
+3. **`model_tools.py` 是唯一触发工具发现的模块**。`_discover_tools()` 在 `model_tools.py` 的模块级执行（`line 170`），所以只要有人 `import model_tools`，所有工具就自动注册。`run_agent.py` 的第 63-68 行导入了 `model_tools` 的公共 API：
+
+```python
+from model_tools import (
+    get_tool_definitions,
+    get_toolset_for_tool,
+    handle_function_call,
+    check_toolset_requirements,
+)
+```
+
+这个 import 触发 `model_tools.py` 的模块级代码，进而触发 `_discover_tools()`，进而 import 所有工具模块，进而执行所有 `registry.register()` 调用。一行 import，全部就绪。
+
+---
+
+## Toolset：工具的分组逻辑
+
+50+ 工具不是扁平地暴露给模型的。`toolsets.py` 定义了**工具集**——工具的逻辑分组：
+
+```python
+# toolsets.py:31-63
+_HERMES_CORE_TOOLS = [
+    # Web
+    "web_search", "web_extract",
+    # Terminal + process management
+    "terminal", "process",
+    # File manipulation
+    "read_file", "write_file", "patch", "search_files",
+    # Vision + image generation
+    "vision_analyze", "image_generate",
+    # Skills
+    "skills_list", "skill_view", "skill_manage",
+    # Browser automation
+    "browser_navigate", "browser_snapshot", "browser_click", ...
+    # Planning & memory
+    "todo", "memory",
+    # Session history search
+    "session_search",
+    # Code execution + delegation
+    "execute_code", "delegate_task",
+    # Cross-platform messaging
+    "send_message",
+    # ...
+]
+```
+
+`_HERMES_CORE_TOOLS` 是 CLI 和所有消息平台共享的默认工具集。每个工具集可以独立启用或禁用：
+
+```python
+TOOLSETS = {
+    "web": {
+        "description": "Web research and content extraction tools",
+        "tools": ["web_search", "web_extract"],
+    },
+    "terminal": {
+        "description": "Terminal/command execution and process management tools",
+        "tools": ["terminal", "process"],
+    },
+    "browser": {
+        "description": "Browser automation for web interaction",
+        "tools": ["browser_navigate", "browser_snapshot", ...],
+    },
+    "rl": {
+        "description": "RL training tools for Tinker-Atropos",
+        "tools": ["rl_list_environments", "rl_select_environment", ...],
+    },
+    # ...
+}
+```
+
+这个分组的用途是**控制 Agent 的能力边界**：
+
+- CLI 默认启用 `_HERMES_CORE_TOOLS` 中的所有工具集
+- Gateway 按平台配置启用子集（比如 SMS 适配器可能只启用 `web` 和 `terminal`）
+- Batch runner 使用 `toolset_distributions.py` 随机采样不同的工具集组合——生成多样化的训练数据
+- RL CLI 额外启用 `rl` 工具集——这些工具在其他入口中不可用
+
+`AIAgent.__init__` 接收 `enabled_toolsets` 和 `disabled_toolsets` 参数。`get_tool_definitions()` 根据这两个参数过滤 registry 中的工具，只把符合条件的工具 schema 发给 LLM。模型看不到被禁用的工具——它根本不知道它们存在。
+
+---
+
+## 同步内核里的异步桥梁
+
+一个可能让你惊讶的事实：`run_conversation()` 的主循环是**完全同步**的。它不是 async def，内部也没有 await。
+
+```python
+# AGENTS.md 中的描述：
+# The core loop is inside run_conversation() — entirely synchronous
+```
+
+但 Hermes 的很多工具是异步的——MCP 客户端用 `aiohttp`，浏览器工具用 `playwright`（async API），Web 工具用 `httpx`（async）。`model_tools.py` 的 `_run_async()` 函数（`line 81`）是同步/异步世界之间的桥梁：
+
+```python
+# model_tools.py:81-125
+def _run_async(coro):
+    """Run an async coroutine from a sync context."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # 在异步上下文中（Gateway/RL）→ 启动新线程
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=300)
+
+    # CLI 路径 → 使用持久事件循环
+    if threading.current_thread() is not threading.main_thread():
+        worker_loop = _get_worker_loop()  # 工作线程用独立循环
+        return worker_loop.run_until_complete(coro)
+
+    tool_loop = _get_tool_loop()  # 主线程用全局持久循环
+    return tool_loop.run_until_complete(coro)
+```
+
+三条路径，对应三种调用场景：
+
+1. **Gateway/RL 中**（已有运行的事件循环）→ 在新线程中 `asyncio.run()`
+2. **CLI 工作线程中**（并行工具执行）→ 使用 per-thread 持久循环
+3. **CLI 主线程中**（默认路径）→ 使用全局持久循环
+
+"持久循环"而不是每次 `asyncio.run()` 的原因在注释中解释得很清楚：`asyncio.run()` 创建新循环、运行协程、然后**关闭循环**。但 httpx 和 AsyncOpenAI 这样的库在 GC 时会尝试在绑定的循环上清理资源——如果循环已关闭，就会抛出 `RuntimeError: Event loop is closed`。持久循环避免了这个问题。
+
+---
+
+## 对照表：概念 → 文件 → 章节
+
+读到这里，你已经有了一个覆盖全局的心智模型。下表把每个核心概念映射到具体的源文件和本书后续章节：
+
+| 概念 | 核心文件 | 行数 | 后续章节 |
+|------|---------|------|---------|
+| AIAgent 类 | `run_agent.py` | 10,594 | 第 4–5 章 |
+| 系统提示组装 | `agent/prompt_builder.py` | — | 第 6 章 |
+| 上下文压缩 | `agent/context_compressor.py` | — | 第 7 章 |
+| 消息模型与流式 | `run_agent.py` (API 适配) | — | 第 8 章 |
+| 错误分类与路由 | `agent/error_classifier.py` | — | 第 9 章 |
+| 工具注册表 | `tools/registry.py` | — | 第 10 章 |
+| 工具集代数 | `toolsets.py` | — | 第 11 章 |
+| 工具编排 | `model_tools.py` | — | 第 10–11 章 |
+| 终端后端 | `tools/environments/*.py` | — | 第 12 章 |
+| 文件/Web 工具 | `tools/file_tools.py`, `web_tools.py` | — | 第 13 章 |
+| 浏览器/MCP | `tools/browser_tool.py`, `mcp_tool.py` | — | 第 14 章 |
+| 代码执行/委派 | `tools/code_execution_tool.py`, `delegate_tool.py` | — | 第 15 章 |
+| 会话存储 | `hermes_state.py` | — | 第 16 章 |
+| 持久记忆 | `tools/memory_tool.py`, `agent/memory_manager.py` | — | 第 17 章 |
+| Skills 系统 | `tools/skills_tool.py`, `skills/` | — | 第 18 章 |
+| 会话搜索 | `tools/session_search_tool.py` | — | 第 19 章 |
+| 学习闭环 | 综合 | — | 第 20 章 |
+| Gateway | `gateway/run.py` | 8,982 | 第 21 章 |
+| 平台适配器 | `gateway/platforms/*.py` | — | 第 22 章 |
+| CLI 交互 | `cli.py`, `hermes_cli/` | 9,956 | 第 24 章 |
+| 配置与凭据 | `hermes_cli/config.py`, `agent/credential_pool.py` | — | 第 25 章 |
+| 安全 | `tools/approval.py`, `agent/prompt_builder.py` (扫描) | — | 第 26 章 |
+
+---
+
+## 三个必须记住的事
+
+本章信息量不小。如果只能记住三件事，记住这三个：
+
+**第一**，`run_conversation()` 是一个同步的 while 循环。它反复做三件事：准备消息 → 调用 LLM API → 处理响应（执行工具或终止）。所有的复杂度——并行工具执行、上下文压缩、中断处理、fallback 切换——都是这个循环内部的条件分支。
+
+**第二**，工具通过 import-time 自注册。`tools/registry.py` 是零依赖的注册中心；每个工具文件 import 它并调用 `register()`；`model_tools.py` 通过 import 所有工具模块触发全部注册；`AIAgent` 通过 `get_tool_definitions()` 获取符合当前 toolset 配置的工具子集发给 LLM。
+
+**第三**，系统提示只构建一次然后缓存。这是为了 Anthropic prompt caching 的命中率。动态内容（记忆插件、用户上下文）注入到 user 消息中，不触碰系统提示。
+
+带着这三个概念，你可以进入后续任何一章而不会迷路。
 
 ---
 
 ## 速查表
 
-| 文件 | 角色 |
-|------|------|
-| `run_agent.py` | AIAgent 核心循环 |
-| `model_tools.py` | 工具编排层 |
-| `toolsets.py` | 工具集定义 |
-| `AGENTS.md` | 开发指南与架构描述 |
+| 文件 | 行数 | 角色 |
+|------|------|------|
+| `run_agent.py` | 10,594 | AIAgent 核心类、主循环、系统提示组装 |
+| `model_tools.py` | ~540 | 工具编排层——发现、分发、async 桥接 |
+| `toolsets.py` | ~350 | 工具集定义与组合 |
+| `tools/registry.py` | ~200 | 中央工具注册表（零依赖） |
+| `agent/prompt_builder.py` | — | 系统提示组件——身份、指导、上下文文件、注入检测 |
+| `agent/context_compressor.py` | — | 上下文压缩引擎 |
+| `agent/credential_pool.py` | — | 多凭据池 + fallback 链 |
+| `hermes_state.py` | — | SessionDB (SQLite + FTS5) |
+| `AGENTS.md` | — | 项目架构描述 + 开发指南 |
