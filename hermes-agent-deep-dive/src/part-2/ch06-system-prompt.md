@@ -144,7 +144,7 @@ if system_message is not None:
 
 `system_message` 来自调用者——CLI 从用户配置中读取，Gateway 从平台消息中提取。它被追加而不是替换，保留了所有前面的层。
 
-注意：`ephemeral_system_prompt` **不在**这里注入。它在 `run_conversation()` 的消息准备流水线中被追加到有效System Prompt末尾（第 5 章 5.6 节），但不进入缓存的 `_cached_system_prompt`。这确保了临时提示不污染持久化的System Prompt快照。
+注意：`ephemeral_system_prompt` **不在**这里注入。它在 `run_conversation()` 的消息准备流水线中被追加到有效System Prompt末尾（第 5 章 5.7 节），但不进入缓存的 `_cached_system_prompt`。这确保了临时提示不污染持久化的System Prompt快照。
 
 ### 第五层：记忆快照
 

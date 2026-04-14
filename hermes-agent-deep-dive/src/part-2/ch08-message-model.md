@@ -465,13 +465,13 @@ smart_routing:
 
 ## 8.5 流式输出处理
 
-Hermes 的 API 调用**始终使用流式模式**（参见第 5 章 5.5 节的 always-stream 设计）。流式处理的核心挑战在于：在 token 逐个到达时，如何检测工具调用？
+Hermes 的 API 调用**始终使用流式模式**（参见第 5 章 5.8 节的 always-stream 设计）。流式处理的核心挑战在于：在 token 逐个到达时，如何检测工具调用？
 
 对于 OpenAI Chat Completions，每个 SSE 事件的 `delta` 可能包含 `tool_calls` 数组的增量片段——函数名可能在一个事件中到达，参数 JSON 在后续事件中逐字符到达。主循环累积这些增量直到 `finish_reason` 变为 `tool_calls`，然后将完整的 tool call 传给执行器。
 
 对于 Anthropic，流式事件更结构化——`content_block_start` 标记一个新的 `tool_use` 块开始，`content_block_delta` 传输参数增量，`content_block_stop` 标记结束。但 Anthropic 的 thinking 块在流式中需要特殊处理——每个 thinking 块的签名在 `content_block_stop` 时才到达，整个块必须被缓冲直到签名完整。
 
-响应验证也在流式累积完成后发生。三种 api_mode 的验证逻辑不同（第 5 章 5.6 节），但最终都归一化为 OpenAI 格式的 `assistant_message` 和 `finish_reason`。
+响应验证也在流式累积完成后发生。三种 api_mode 的验证逻辑不同（第 5 章 5.9 节），但最终都归一化为 OpenAI 格式的 `assistant_message` 和 `finish_reason`。
 
 ---
 
