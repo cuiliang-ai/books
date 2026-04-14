@@ -1,58 +1,496 @@
 
 # 第 8 章：消息模型、API 适配与流式
 
-> **核心问题**：多模型 API 如何统一抽象？Anthropic 适配器的特殊处理是什么？
+> **核心问题**：Hermes 如何用一套内部消息格式对接三种不同的 LLM API？Anthropic 适配器为什么需要 1400 行代码？凭据池和智能路由如何在运行时动态切换模型？
 
 ---
 
-## 8.1 消息格式统一
+## 8.1 统一消息格式的选择
 
-- OpenAI Chat Completions 格式为基础
-- role: system / user / assistant / tool
-- 源锚：`run_agent.py` — 消息构造
+Hermes Agent 支持三种 API 协议：OpenAI Chat Completions、OpenAI Codex Responses、Anthropic Messages。三者的消息格式各不相同——OpenAI 用 `role`/`content`/`tool_calls`，Anthropic 用 `content` 块数组加独立的 `system` 参数，Codex 有自己的 `item` 模型。
 
-> TODO: 统一消息格式详解
+面对这个三岔路口，Hermes 做了一个务实的选择：**以 OpenAI Chat Completions 格式为内部表示**。所有消息在内存中、日志中、数据库中都以 `{"role": "...", "content": "...", "tool_calls": [...]}` 的形式存储。只有在即将发起 API 调用的那一刻，才根据 `api_mode` 选择对应的适配器做格式转换。
+
+这个选择有几个原因：
+
+1. **生态覆盖**：绝大多数 LLM 提供商（OpenRouter、Together、Groq、DeepSeek、MiniMax）都兼容 OpenAI 格式，直接可用
+2. **工具系统兼容**：Hermes 的工具定义、执行、结果注入全部按 OpenAI 格式设计
+3. **最小转换面**：只有 Anthropic 和 Codex 两种协议需要适配器，且转换只在 API 调用边界发生
+
+当 `api_mode == "anthropic_messages"` 时，`agent/anthropic_adapter.py` 负责双向转换。当 `api_mode == "codex_responses"` 时，`agent/codex_adapter.py`（本章不深入）处理 Codex 协议。对于默认的 `chat_completions` 模式，消息原样传递，不需要转换。
 
 ---
 
 ## 8.2 Anthropic Messages API 适配器
 
-- 源锚：`agent/anthropic_adapter.py`
-- `THINKING_BUDGET` — 思考预算
-- `_ANTHROPIC_OUTPUT_LIMITS` — 输出限制
-- Messages API 与 Chat Completions 的格式转换
+`agent/anthropic_adapter.py` 是整个代码库中最大的适配器文件——1411 行。这个体量不是因为"转换格式"有多复杂，而是因为 Anthropic 的 API 有大量**特殊约束**，每一个都需要专门处理。
 
-> TODO: 适配器转换逻辑详解
+### 8.2.1 三种认证路径
+
+Anthropic 的认证方式比 OpenAI 复杂得多。`build_anthropic_client()` 必须处理四种完全不同的认证场景：
+
+```python
+# agent/anthropic_adapter.py:243-298
+def build_anthropic_client(api_key, base_url=None):
+    if _requires_bearer_auth(normalized_base_url):
+        # 第三方兼容端点（MiniMax）：Bearer auth
+        kwargs["auth_token"] = api_key
+    elif _is_third_party_anthropic_endpoint(base_url):
+        # 第三方代理（Azure, Bedrock）：x-api-key
+        kwargs["api_key"] = api_key
+    elif _is_oauth_token(api_key):
+        # OAuth 令牌：Bearer auth + Claude Code 身份伪装
+        kwargs["auth_token"] = api_key
+        kwargs["default_headers"] = {
+            "anthropic-beta": ",".join(all_betas),
+            "user-agent": f"claude-cli/{_get_claude_code_version()} ...",
+            "x-app": "cli",
+        }
+    else:
+        # 普通 API Key：x-api-key
+        kwargs["api_key"] = api_key
+```
+
+**OAuth 路径**是最有趣的。当用户通过 Claude Pro/Max 订阅认证时，密钥以 `sk-ant-`（但不是 `sk-ant-api`）或 `eyJ`（JWT）开头。对于这类密钥，适配器必须伪装成 Claude Code——添加 `claude-code-20250219` beta 头、设置 `user-agent` 为 `claude-cli/<version>`、添加 `x-app: cli` 头。
+
+为什么要伪装？因为 Anthropic 的基础设施根据 user-agent 做路由。没有 Claude Code 的指纹，OAuth 请求会出现间歇性的 500 错误。版本号必须保持相对新——Anthropic 会拒绝版本过旧的 user-agent。
+
+`_detect_claude_code_version()` 尝试在本地运行 `claude --version` 来获取实际版本号，失败时回退到硬编码的 `_CLAUDE_CODE_VERSION_FALLBACK = "2.1.74"`：
+
+```python
+# agent/anthropic_adapter.py:128-150
+def _detect_claude_code_version():
+    for cmd in ("claude", "claude-code"):
+        try:
+            result = _sp.run([cmd, "--version"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                version = result.stdout.strip().split()[0]
+                if version and version[0].isdigit():
+                    return version
+        except Exception:
+            pass
+    return _CLAUDE_CODE_VERSION_FALLBACK
+```
+
+### 8.2.2 Beta 头管理
+
+Anthropic 的 API 功能通过 beta 头解锁。适配器管理多组 beta：
+
+```python
+# agent/anthropic_adapter.py:99-118
+_COMMON_BETAS = [
+    "interleaved-thinking-2025-05-14",
+    "fine-grained-tool-streaming-2025-05-14",
+]
+_FAST_MODE_BETA = "fast-mode-2026-02-01"
+_OAUTH_ONLY_BETAS = [
+    "claude-code-20250219",
+    "oauth-2025-04-20",
+]
+```
+
+- **`interleaved-thinking`**：允许 thinking 块与 tool_use 块交替出现
+- **`fine-grained-tool-streaming`**：工具调用的细粒度流式传输
+- **`fast-mode`**：Opus 4.6 的快速模式（~2.5x 输出速度）
+- **`claude-code` 和 `oauth`**：仅 OAuth 认证时需要
+
+但 beta 头不是万能的——MiniMax 的 Anthropic 兼容端点在收到 `fine-grained-tool-streaming` 时会报错。`_common_betas_for_base_url()` 根据 URL 动态剥离不兼容的 beta：
+
+```python
+# agent/anthropic_adapter.py:230-240
+def _common_betas_for_base_url(base_url):
+    if _requires_bearer_auth(base_url):
+        return [b for b in _COMMON_BETAS if b != _TOOL_STREAMING_BETA]
+    return _COMMON_BETAS
+```
+
+### 8.2.3 输出 Token 上限
+
+Anthropic 的 `max_tokens` 是**必填参数**，而且它只限制**输出**，不包括输入。不同模型的上限差异巨大：
+
+```python
+# agent/anthropic_adapter.py:43-69
+_ANTHROPIC_OUTPUT_LIMITS = {
+    "claude-opus-4-6":   128_000,
+    "claude-sonnet-4-6":  64_000,
+    "claude-opus-4-5":    64_000,
+    "claude-sonnet-4":    64_000,
+    "claude-3-5-sonnet":   8_192,
+    "claude-3-opus":       4_096,
+    "minimax":            131_072,
+}
+_ANTHROPIC_DEFAULT_OUTPUT_LIMIT = 128_000
+```
+
+`_get_anthropic_max_output()` 使用**子串匹配**而非精确匹配，所以 `claude-sonnet-4-5-20250929`（带日期戳）和 `anthropic/claude-opus-4.6`（带前缀和句点）都能正确解析。最长匹配优先，避免 `claude-3-5` 在 `claude-3-5-sonnet` 之前匹配。
+
+### 8.2.4 消息格式转换
+
+`convert_messages_to_anthropic()` 是适配器的核心函数——将 OpenAI 格式转换为 Anthropic 格式。它处理六个关键差异：
+
+**差异 1：系统消息分离**。OpenAI 将 system 消息放在消息数组中；Anthropic 将其作为独立的 `system` 参数。
+
+**差异 2：工具调用格式**。OpenAI 用 `tool_calls` 数组（包含 `function.name` 和 `function.arguments` JSON 字符串）；Anthropic 用 `tool_use` 内容块（包含 `name` 和已解析的 `input` 对象）。
+
+```python
+# agent/anthropic_adapter.py:964-978
+for tc in m.get("tool_calls", []):
+    fn = tc.get("function", {})
+    args = fn.get("arguments", "{}")
+    parsed_args = json.loads(args) if isinstance(args, str) else args
+    blocks.append({
+        "type": "tool_use",
+        "id": _sanitize_tool_id(tc.get("id", "")),
+        "name": fn.get("name", ""),
+        "input": parsed_args,
+    })
+```
+
+**差异 3：工具结果格式**。OpenAI 的 `tool` 角色消息变成 Anthropic 的 `user` 角色消息中的 `tool_result` 块。连续的多个工具结果必须合并到同一个 `user` 消息中。
+
+**差异 4：空内容处理**。Anthropic 拒绝空的 assistant 或 user 消息。代码将空内容替换为 `"(empty)"` 或 `"(empty message)"`。
+
+**差异 5：严格角色交替**。Anthropic 不允许连续的相同角色消息。转换完成后，一个后处理循环合并连续的同角色消息——user 消息合并内容，assistant 消息合并但丢弃第二条的 thinking 块（签名会因合并而失效）。
+
+**差异 6：Thinking 块签名管理**。这是最复杂的部分（第 1111-1183 行）。Anthropic 对 thinking 块签名——签名与完整轮次内容绑定。上下文压缩、消息合并、orphan 修剪都可能使签名失效。处理策略分两种情况：
+
+- **直连 Anthropic**：只保留最后一条 assistant 消息的已签名 thinking 块，其余全部剥离。未签名的 thinking 块降级为普通文本。
+- **第三方端点**：剥离所有 thinking 块——第三方无法验证 Anthropic 的专有签名。
+
+### 8.2.5 OAuth 身份伪装
+
+当使用 OAuth 认证时，`build_anthropic_kwargs()` 执行三个额外的转换（第 1253-1291 行）：
+
+1. **系统提示前缀**：添加 `"You are Claude Code, Anthropic's official CLI for Claude."`
+2. **产品名替换**：将 "Hermes Agent" 替换为 "Claude Code"，"Nous Research" 替换为 "Anthropic"——避免触发 Anthropic 的服务端内容过滤器
+3. **工具名前缀**：所有工具名添加 `mcp_` 前缀（Claude Code 约定），历史消息中的工具名同步更新
+
+### 8.2.6 Thinking 配置
+
+Extended thinking 的配置根据模型代际分两种模式：
+
+```python
+# agent/anthropic_adapter.py:1320-1333
+if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
+    effort = str(reasoning_config.get("effort", "medium")).lower()
+    budget = THINKING_BUDGET.get(effort, 8000)
+    if _supports_adaptive_thinking(model):
+        # Claude 4.6：自适应 thinking
+        kwargs["thinking"] = {"type": "adaptive"}
+        kwargs["output_config"] = {"effort": ADAPTIVE_EFFORT_MAP.get(effort, "medium")}
+    else:
+        # 旧模型：手动 thinking + budget
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        kwargs["temperature"] = 1  # Anthropic 要求 thinking 模式下 temperature=1
+        kwargs["max_tokens"] = max(effective_max_tokens, budget + 4096)
+```
+
+`THINKING_BUDGET` 定义了四个档次：`xhigh=32000`、`high=16000`、`medium=8000`、`low=4000`。Claude 4.6 使用自适应 thinking（由 API 自主决定思考深度），旧模型使用固定 budget。Haiku 完全不支持 extended thinking，被跳过。
+
+### 8.2.7 响应规范化
+
+`normalize_anthropic_response()` 将 Anthropic 响应转换回 OpenAI 格式，供主循环统一处理：
+
+```python
+# agent/anthropic_adapter.py:1393-1399
+stop_reason_map = {
+    "end_turn": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+    "stop_sequence": "stop",
+}
+finish_reason = stop_reason_map.get(response.stop_reason, "stop")
+```
+
+Anthropic 的 `end_turn` 变成 OpenAI 的 `stop`，`tool_use` 变成 `tool_calls`。Thinking 内容被提取到 `reasoning` 属性中，thinking 块的原始数据（包含签名）被保存到 `reasoning_details` 中供下次发送时重用。
+
+### 8.2.8 OAuth Token 生命周期
+
+适配器还负责完整的 OAuth 令牌生命周期管理（第 301-740 行）：
+
+- **`resolve_anthropic_token()`**：四级优先级解析——`ANTHROPIC_TOKEN` 环境变量 → `CLAUDE_CODE_OAUTH_TOKEN` → Claude Code 凭据文件（`~/.claude/.credentials.json`）→ `ANTHROPIC_API_KEY`
+- **`refresh_anthropic_oauth_pure()`**：使用 refresh_token 刷新 access_token，尝试两个端点（`platform.claude.com` 和 `console.anthropic.com`）
+- **`run_hermes_oauth_login_pure()`**：完整的 PKCE OAuth 流程——生成 code_verifier/challenge，打开浏览器，等待用户粘贴授权码，交换 token
 
 ---
 
-## 8.3 Credential Pool 与多模型切换
+## 8.3 Credential Pool：多凭据管理
 
-- 源锚：`agent/credential_pool.py`
-- `STATUS_OK` / `STATUS_EXHAUSTED`
-- `AUTH_TYPE_OAUTH` / `AUTH_TYPE_API_KEY`
-- 自动 failover 机制
+当用户拥有多个 API 密钥（个人密钥 + 团队密钥 + OAuth 令牌），`agent/credential_pool.py` 管理它们的选择、轮换和刷新。
 
-> TODO: 凭据池状态机与 failover 流程
+### 8.3.1 PooledCredential 数据类
+
+每个凭据是一个 `PooledCredential` 实例：
+
+```python
+# agent/credential_pool.py:93-116
+@dataclass
+class PooledCredential:
+    provider: str
+    id: str
+    label: str
+    auth_type: str       # "oauth" 或 "api_key"
+    priority: int
+    source: str           # "manual", "env:ANTHROPIC_API_KEY", "claude_code", etc.
+    access_token: str
+    refresh_token: Optional[str] = None
+    last_status: Optional[str] = None       # "ok" 或 "exhausted"
+    last_status_at: Optional[float] = None
+    last_error_code: Optional[int] = None
+    base_url: Optional[str] = None
+    request_count: int = 0
+    extra: Dict[str, Any] = None
+```
+
+`source` 字段区分凭据的来源——手动添加的（`manual`）、环境变量（`env:ANTHROPIC_API_KEY`）、Claude Code 凭据文件（`claude_code`）、Hermes PKCE 流程（`hermes_pkce`）、设备码流程（`device_code`）。
+
+`last_status` 跟踪凭据的健康状态。当一个凭据因为 429 或 402 失败时，它被标记为 `STATUS_EXHAUSTED`，并进入冷却期。
+
+### 8.3.2 四种选择策略
+
+CredentialPool 支持四种凭据选择策略：
+
+```python
+# agent/credential_pool.py:64-70
+STRATEGY_FILL_FIRST = "fill_first"       # 用完一个再用下一个
+STRATEGY_ROUND_ROBIN = "round_robin"     # 轮流使用
+STRATEGY_RANDOM = "random"               # 随机选择
+STRATEGY_LEAST_USED = "least_used"       # 使用次数最少的优先
+```
+
+**Fill First**（默认）：始终使用优先级最高的可用凭据，只有当它被标记为 exhausted 后才切换到下一个。这最简单，适合"一个主密钥 + 一个备用密钥"的场景。
+
+**Round Robin**：每次选择后，当前凭据被移到队列末尾。适合负载均衡，但实现细节值得注意——它不是简单地递增索引，而是通过 `replace(entry, priority=len(self._entries) - 1)` 重新排序并**持久化到磁盘**，确保重启后状态一致。
+
+**Least Used**：基于 `request_count` 选择使用次数最少的凭据。
+
+**Random**：`random.choice(available)`——最简单的均匀分布。
+
+策略通过 `config.yaml` 的 `credential_pool_strategies` 按 provider 配置。
+
+### 8.3.3 耗尽与冷却
+
+当一个凭据收到 429 或 402 时：
+
+```python
+# agent/credential_pool.py:396-414
+def _mark_exhausted(self, entry, status_code, error_context=None):
+    normalized_error = _normalize_error_context(error_context)
+    updated = replace(
+        entry,
+        last_status=STATUS_EXHAUSTED,
+        last_status_at=time.time(),
+        last_error_code=status_code,
+        last_error_reason=normalized_error.get("reason"),
+        last_error_reset_at=normalized_error.get("reset_at"),
+    )
+    self._replace_entry(entry, updated)
+    self._persist()
+    return updated
+```
+
+冷却时间默认为 1 小时（`EXHAUSTED_TTL_429_SECONDS = 60 * 60`），但如果错误消息中包含 `quotaResetDelay` 或 `retry after N seconds`，`_extract_retry_delay_seconds()` 会解析出精确的等待时间并用于 `last_error_reset_at`。
+
+`_available_entries()` 在选择凭据时检查冷却：
+
+```python
+# agent/credential_pool.py:796-799
+if entry.last_status == STATUS_EXHAUSTED:
+    exhausted_until = _exhausted_until(entry)
+    if exhausted_until is not None and now < exhausted_until:
+        continue  # 仍在冷却中，跳过
+```
+
+冷却到期后，凭据自动恢复为 `STATUS_OK`。
+
+### 8.3.4 Token 刷新与跨进程同步
+
+OAuth 凭据（Anthropic、OpenAI Codex、Nous）的 refresh token 是**一次性的**——每次刷新都会返回一个新的 refresh token，旧的立即失效。这在多进程环境下是一个严重的竞态条件源。
+
+`_refresh_entry()` 的解决方案是**先同步再刷新**：
+
+```python
+# agent/credential_pool.py:580-591
+elif self.provider == "openai-codex":
+    synced = self._sync_codex_entry_from_cli(entry)
+    if synced is not entry:
+        entry = synced
+    refreshed = auth_mod.refresh_codex_oauth_pure(
+        entry.access_token, entry.refresh_token,
+    )
+```
+
+对于 Anthropic，`_sync_anthropic_entry_from_credentials_file()` 从 `~/.claude/.credentials.json` 读取最新的 token 对；对于 Codex，`_sync_codex_entry_from_cli()` 从 `~/.codex/auth.json` 读取。如果发现 refresh token 已经被外部进程（Claude Code CLI、另一个 Hermes 配置文件）更新了，就用最新的 token 对进行刷新。
+
+如果刷新仍然失败（token 已被消费），代码会再做一次同步-重试循环。这个两层重试机制处理了大部分跨进程竞态。
+
+### 8.3.5 自动凭据发现
+
+`load_pool()` 在创建 CredentialPool 时自动从多个来源发现凭据：
+
+```python
+# agent/credential_pool.py:1334-1356
+def load_pool(provider):
+    raw_entries = read_credential_pool(provider)
+    entries = [PooledCredential.from_dict(provider, payload) for payload in raw_entries]
+
+    if provider.startswith(CUSTOM_POOL_PREFIX):
+        custom_changed, custom_sources = _seed_custom_pool(provider, entries)
+    else:
+        singleton_changed, singleton_sources = _seed_from_singletons(provider, entries)
+        env_changed, env_sources = _seed_from_env(provider, entries)
+        changed |= _prune_stale_seeded_entries(entries, singleton_sources | env_sources)
+        changed |= _normalize_pool_priorities(provider, entries)
+```
+
+**`_seed_from_singletons()`**：从 Claude Code 凭据文件和 Hermes PKCE 凭据中自动发现 Anthropic OAuth 令牌；从 `auth.json` 中发现 Nous 和 Codex 设备码令牌。
+
+**`_seed_from_env()`**：从环境变量中发现 API 密钥——`ANTHROPIC_TOKEN`、`ANTHROPIC_API_KEY`、`OPENROUTER_API_KEY` 等。
+
+**`_prune_stale_seeded_entries()`**：移除那些来源已不存在的自动发现条目（比如环境变量被删除了），但保留手动添加的条目。
+
+对于 Anthropic，凭据优先级被规范化为固定顺序（第 1042-1073 行）：手动条目优先，然后按来源排序——`ANTHROPIC_TOKEN` > `CLAUDE_CODE_OAUTH_TOKEN` > `hermes_pkce` > `claude_code` > `ANTHROPIC_API_KEY`。OAuth 令牌（通常有更高的配额限制）优先于普通 API 密钥。
+
+### 8.3.6 并发租约
+
+在 Gateway 模式下，多个请求可能同时使用凭据池。`acquire_lease()` 和 `release_lease()` 提供软性的并发控制：
+
+```python
+# agent/credential_pool.py:883-912
+def acquire_lease(self, credential_id=None):
+    with self._lock:
+        # 优先选择租约最少的凭据
+        candidates = below_cap if below_cap else available
+        chosen = min(
+            candidates,
+            key=lambda entry: (self._active_leases.get(entry.id, 0), entry.priority),
+        )
+        self._active_leases[chosen.id] = self._active_leases.get(chosen.id, 0) + 1
+        return chosen.id
+```
+
+默认并发上限为每个凭据 1 个租约（`DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL = 1`），但当所有凭据都达到上限时，退化为返回租约最少的那个而非阻塞。
 
 ---
 
 ## 8.4 Smart Model Routing
 
-- 源锚：`agent/smart_model_routing.py`
-- `_COMPLEX_KEYWORDS` — 复杂度关键词检测
-- `choose_cheap_model_route()` — cheap/strong 模型路由
+`agent/smart_model_routing.py`（196 行）实现了一个简单但有效的优化：对于简单的用户消息，使用便宜/快速的模型代替主模型（通常是 strong/expensive 的）。
 
-> TODO: 路由决策逻辑详解
+### 8.4.1 简单消息检测
+
+`choose_cheap_model_route()` 用一组启发式规则判断消息是否"简单"：
+
+```python
+# agent/smart_model_routing.py:62-107
+def choose_cheap_model_route(user_message, routing_config):
+    text = (user_message or "").strip()
+    max_chars = _coerce_int(cfg.get("max_simple_chars"), 160)
+    max_words = _coerce_int(cfg.get("max_simple_words"), 28)
+
+    if len(text) > max_chars: return None      # 太长
+    if len(text.split()) > max_words: return None  # 太多词
+    if text.count("\n") > 1: return None       # 多行
+    if "```" in text or "`" in text: return None  # 包含代码
+    if _URL_RE.search(text): return None        # 包含 URL
+
+    lowered = text.lower()
+    words = {token.strip(".,:;!?()[]{}\"'`") for token in lowered.split()}
+    if words & _COMPLEX_KEYWORDS: return None   # 包含复杂度关键词
+```
+
+默认阈值是 160 字符、28 词。超过任一限制就不算"简单"。此外，以下信号也会阻止路由到 cheap 模型：
+
+- 多行内容（超过 1 个换行）
+- 代码块或行内代码（反引号）
+- URL
+- **复杂度关键词**：一个 34 个词的集合——
+
+```python
+# agent/smart_model_routing.py:11-46
+_COMPLEX_KEYWORDS = {
+    "debug", "debugging", "implement", "implementation", "refactor",
+    "patch", "traceback", "stacktrace", "exception", "error",
+    "analyze", "analysis", "investigate", "architecture", "design",
+    "compare", "benchmark", "optimize", "review", "terminal",
+    "shell", "tool", "tools", "pytest", "test", "tests",
+    "plan", "planning", "delegate", "subagent",
+    "cron", "docker", "kubernetes",
+}
+```
+
+只有当所有检查都通过时（消息短、无代码、无关键词），才会返回 cheap 模型的路由信息。这是一个**保守的设计**——宁可用贵的模型处理简单问题，也不要用便宜的模型搞砸复杂问题。
+
+### 8.4.2 路由解析
+
+`resolve_turn_route()` 将路由决策与运行时解析结合：
+
+```python
+# agent/smart_model_routing.py:110-195
+def resolve_turn_route(user_message, routing_config, primary):
+    route = choose_cheap_model_route(user_message, routing_config)
+    if not route:
+        return {
+            "model": primary.get("model"),
+            "runtime": {...primary runtime...},
+            "label": None,
+            "signature": (...primary signature...),
+        }
+    # 解析 cheap 模型的运行时
+    runtime = resolve_runtime_provider(requested=route.get("provider"), ...)
+    return {
+        "model": route.get("model"),
+        "runtime": {...cheap runtime...},
+        "label": f"smart route → {route.get('model')} ({runtime.get('provider')})",
+        "signature": (...cheap signature...),
+    }
+```
+
+返回的 `signature` 元组用于检测路由是否真的切换了——如果 cheap 模型和 primary 模型碰巧是同一个（相同的 model + provider + base_url），就不需要重建客户端。
+
+cheap 模型在 `config.yaml` 中配置：
+
+```yaml
+smart_routing:
+  enabled: true
+  max_simple_chars: 160
+  max_simple_words: 28
+  cheap_model:
+    provider: openrouter
+    model: deepseek/deepseek-chat
+    api_key_env: OPENROUTER_API_KEY
+```
 
 ---
 
 ## 8.5 流式输出处理
 
-- SSE 流式 token 输出
-- 工具调用的流式检测
+Hermes 的 API 调用**始终使用流式模式**（参见第 5 章 5.5 节的 always-stream 设计）。流式处理的核心挑战在于：在 token 逐个到达时，如何检测工具调用？
 
-> TODO: 流式处理的技术细节
+对于 OpenAI Chat Completions，每个 SSE 事件的 `delta` 可能包含 `tool_calls` 数组的增量片段——函数名可能在一个事件中到达，参数 JSON 在后续事件中逐字符到达。主循环累积这些增量直到 `finish_reason` 变为 `tool_calls`，然后将完整的 tool call 传给执行器。
+
+对于 Anthropic，流式事件更结构化——`content_block_start` 标记一个新的 `tool_use` 块开始，`content_block_delta` 传输参数增量，`content_block_stop` 标记结束。但 Anthropic 的 thinking 块在流式中需要特殊处理——每个 thinking 块的签名在 `content_block_stop` 时才到达，整个块必须被缓冲直到签名完整。
+
+响应验证也在流式累积完成后发生。三种 api_mode 的验证逻辑不同（第 5 章 5.6 节），但最终都归一化为 OpenAI 格式的 `assistant_message` 和 `finish_reason`。
+
+---
+
+## 8.6 Fast Mode
+
+Claude Opus 4.6 支持"快速模式"——通过添加 `speed: "fast"` 参数和 `fast-mode-2026-02-01` beta 头，输出吞吐量提升约 2.5 倍：
+
+```python
+# agent/anthropic_adapter.py:1339-1348
+if fast_mode and not _is_third_party_anthropic_endpoint(base_url):
+    kwargs["speed"] = "fast"
+    betas = list(_common_betas_for_base_url(base_url))
+    if is_oauth:
+        betas.extend(_OAUTH_ONLY_BETAS)
+    betas.append(_FAST_MODE_BETA)
+    kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
+```
+
+Fast mode 仅在直连 Anthropic 端点时启用——第三方提供商不认识这个参数和 beta 头。`extra_headers` 覆盖了客户端级的 `anthropic-beta` 头，因为 per-request headers 优先于 client-level headers。
 
 ---
 
@@ -60,7 +498,12 @@
 
 | 文件 | 角色 |
 |------|------|
-| `agent/anthropic_adapter.py` | Anthropic API 适配器 |
-| `agent/credential_pool.py` | 多凭据池管理 |
-| `agent/smart_model_routing.py` | cheap/strong 路由 |
-| `hermes_cli/auth.py` | 认证配置 |
+| `agent/anthropic_adapter.py` | Anthropic Messages API 适配器，1411 行。认证、消息转换、thinking 管理、OAuth PKCE |
+| `agent/credential_pool.py` | 多凭据池管理，1357 行。四种策略、耗尽冷却、OAuth 刷新、自动发现 |
+| `agent/smart_model_routing.py` | cheap/strong 模型路由，196 行。启发式简单消息检测 |
+| `_ANTHROPIC_OUTPUT_LIMITS` | 每模型输出 token 上限表（4K-131K） |
+| `_COMPLEX_KEYWORDS` | 34 个触发 strong 模型的复杂度关键词 |
+| `THINKING_BUDGET` | thinking token 预算：xhigh=32K, high=16K, medium=8K, low=4K |
+| `PooledCredential` | 凭据数据类——provider、auth_type、status、token、priority |
+| `CredentialPool` | 凭据池类——select、mark_exhausted_and_rotate、acquire_lease |
+| `EXHAUSTED_TTL_429_SECONDS` | 429 冷却时间：3600 秒（1 小时） |

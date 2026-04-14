@@ -1,64 +1,535 @@
 
 # 第 4 章：AIAgent 类全貌
 
-> **核心问题**：AIAgent 的构造参数、状态字段和生命周期是怎样的？它是如何被实例化和配置的？
+> **核心问题**：一个拥有 50+ 构造参数的类是如何组织的？它的状态字段如何在会话生命周期中流转？
 
 ---
 
-## 4.1 类签名与构造参数
+## 4.1 为什么只有一个类
 
-- 源锚：`run_agent.py` — `class AIAgent`
-- 构造参数超过 30 个，涵盖模型、工具集、安全、记忆等维度
+打开 `run_agent.py`，你会看到一个 10,594 行的文件，其中 `class AIAgent` 从第 492 行一直延伸到文件末尾。这不是缺乏重构的结果——这是一个有意为之的设计决策。
 
-> TODO: 完整构造参数表与分类
+Hermes Agent 的六种运行模态（CLI、Gateway、ACP、Batch、RL、MCP Server——详见第 2 章）全部共享同一个 `AIAgent` 实例。如果把 AIAgent 拆成多个类，每个入口点就需要自己组装这些碎片，而组装逻辑的不一致性会成为 bug 的温床。一个类意味着一个初始化路径，一个生命周期模型，一个行为保证。
 
----
-
-## 4.2 核心状态字段
-
-- `messages: list` — 会话消息历史
-- `tools: dict` — 已注册工具映射
-- `iteration_budget: IterationBudget` — 迭代预算控制
-- 源锚：`run_agent.py` — `IterationBudget` dataclass
-
-> TODO: 状态字段完整清单与生命周期
+但这并不意味着 AIAgent 内部没有结构。它的构造函数将 50+ 个参数组织为七个概念分区，每个分区对应一个子系统。理解这些分区比记住每个参数都重要得多。
 
 ---
 
-## 4.3 AIAgent 的实例化路径
+## 4.2 构造参数的七个分区
 
-- CLI 路径：`HermesCLI` → `AIAgent()`
-- Gateway 路径：`GatewayRunner` → `AIAgent()`
-- ACP 路径：`acp_adapter` → `AIAgent()`
+`__init__` 从第 516 行开始，签名横跨近 60 行：
 
-> TODO: 不同入口点的参数差异矩阵
+```python
+# run_agent.py:516-573
+def __init__(
+    self,
+    base_url: str = None,
+    api_key: str = None,
+    provider: str = None,
+    api_mode: str = None,
+    acp_command: str = None,
+    acp_args: list[str] | None = None,
+    command: str = None,
+    args: list[str] | None = None,
+    model: str = "",
+    max_iterations: int = 90,
+    tool_delay: float = 1.0,
+    enabled_toolsets: List[str] = None,
+    disabled_toolsets: List[str] = None,
+    save_trajectories: bool = False,
+    verbose_logging: bool = False,
+    quiet_mode: bool = False,
+    ephemeral_system_prompt: str = None,
+    # ... 40+ more parameters
+    persist_session: bool = True,
+):
+```
+
+这些参数按职责可以分为七组。这不是源码中的显式分组——参数在签名中是扁平的——但理解这个概念分区对阅读 `__init__` 至关重要。
+
+**第一组：模型与提供商连接** 决定了 Agent 连接哪个 LLM、通过什么协议、使用什么凭据。这是最基础的配置——没有它，Agent 无法发出第一个 API 请求。
+
+| 参数 | 默认值 | 职责 |
+|------|--------|------|
+| `base_url` | `None` | API 端点 URL |
+| `api_key` | `None` | API 密钥 |
+| `provider` | `None` | 提供商标识（openrouter, anthropic, nous 等） |
+| `api_mode` | `None` | 协议模式：chat_completions / codex_responses / anthropic_messages |
+| `model` | `""` | 模型名称 |
+| `max_tokens` | `None` | 最大输出 token 数 |
+| `reasoning_config` | `None` | 推理配置（effort 级别等） |
+| `service_tier` | `None` | 服务层级 |
+| `request_overrides` | `None` | 请求级覆盖参数 |
+
+**第二组：迭代与工具控制** 决定了 Agent 能执行多少轮、使用哪些工具、工具调用之间有多少延迟。
+
+| 参数 | 默认值 | 职责 |
+|------|--------|------|
+| `max_iterations` | `90` | 最大工具调用迭代次数 |
+| `tool_delay` | `1.0` | 工具调用间延迟（秒） |
+| `enabled_toolsets` | `None` | 白名单工具集 |
+| `disabled_toolsets` | `None` | 黑名单工具集 |
+| `iteration_budget` | `None` | 外部传入的 IterationBudget 实例 |
+
+**第三组：回调函数族** 这是 AIAgent 与外部世界通信的管道。CLI 的 TUI 界面、Gateway 的消息推送、ACP 的事件流——全部通过回调注入。
+
+```python
+# run_agent.py:544-555
+tool_progress_callback: callable = None,
+tool_start_callback: callable = None,
+tool_complete_callback: callable = None,
+thinking_callback: callable = None,
+reasoning_callback: callable = None,
+clarify_callback: callable = None,
+step_callback: callable = None,
+stream_delta_callback: callable = None,
+interim_assistant_callback: callable = None,
+tool_gen_callback: callable = None,
+status_callback: callable = None,
+```
+
+11 个回调覆盖了 Agent 生命周期中的每个关键事件。`thinking_callback` 驱动 CLI 的思考动画，`stream_delta_callback` 驱动实时 token 流式输出，`clarify_callback` 让 Agent 能向用户提问。这种设计让 AIAgent 本身不依赖任何 UI 框架——它只负责"发生了什么"，如何展示是调用者的事。
+
+**第四组：会话与持久化** 控制会话标识、历史消息注入、以及会话数据如何落盘。
+
+| 参数 | 默认值 | 职责 |
+|------|--------|------|
+| `session_id` | `None` | 会话 ID（自动生成或外部传入） |
+| `session_db` | `None` | SQLite 会话存储实例 |
+| `parent_session_id` | `None` | 父会话 ID（用于压缩分裂谱系） |
+| `prefill_messages` | `None` | 预填充消息（few-shot 样例） |
+| `persist_session` | `True` | 是否持久化会话 |
+| `pass_session_id` | `False` | 是否在系统提示中注入 session ID |
+
+**第五组：安全与记忆** 控制是否加载上下文文件、是否启用记忆系统。
+
+| 参数 | 默认值 | 职责 |
+|------|--------|------|
+| `skip_context_files` | `False` | 跳过 SOUL.md / AGENTS.md 等上下文文件 |
+| `skip_memory` | `False` | 跳过持久记忆加载 |
+
+**第六组：可靠性与降级** 配置 fallback 模型、凭据池、检查点。
+
+| 参数 | 默认值 | 职责 |
+|------|--------|------|
+| `fallback_model` | `None` | 降级模型配置（单个或链式） |
+| `credential_pool` | `None` | 外部凭据池实例 |
+| `checkpoints_enabled` | `False` | 文件系统检查点 |
+| `checkpoint_max_snapshots` | `50` | 最大快照数 |
+
+**第七组：OpenRouter 专用** 这组参数只在使用 OpenRouter 聚合器时生效——控制提供商过滤和排序。
+
+| 参数 | 默认值 | 职责 |
+|------|--------|------|
+| `providers_allowed` | `None` | 允许的上游提供商列表 |
+| `providers_ignored` | `None` | 忽略的上游提供商列表 |
+| `providers_order` | `None` | 上游提供商优先级 |
+| `provider_sort` | `None` | 排序策略（price/throughput/latency） |
 
 ---
 
-## 4.4 生命周期管理
+## 4.3 API 模式自动检测
 
-- 创建 → 配置 → run_conversation() → 清理
-- 源锚：`run_agent.py`
+`__init__` 中最精妙的逻辑之一是 API 模式的自动检测。Hermes 支持三种 API 协议，必须在初始化时确定使用哪一种：
 
-> TODO: 生命周期时序图
+```python
+# run_agent.py:645-661
+if api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
+    self.api_mode = api_mode
+elif self.provider == "openai-codex":
+    self.api_mode = "codex_responses"
+elif (provider_name is None) and "chatgpt.com/backend-api/codex" in self._base_url_lower:
+    self.api_mode = "codex_responses"
+    self.provider = "openai-codex"
+elif self.provider == "anthropic" or (provider_name is None and "api.anthropic.com" in self._base_url_lower):
+    self.api_mode = "anthropic_messages"
+    self.provider = "anthropic"
+elif self._base_url_lower.rstrip("/").endswith("/anthropic"):
+    self.api_mode = "anthropic_messages"
+else:
+    self.api_mode = "chat_completions"
+```
+
+这段代码实现了一个三层优先级的检测逻辑：
+
+1. **显式指定优先** — 如果用户通过 `api_mode` 参数直接指定了协议，尊重它。
+2. **提供商名称推断** — 如果 `provider` 是 `"openai-codex"` 或 `"anthropic"`，自动选择对应协议。
+3. **URL 模式匹配** — 如果 base_url 包含 `chatgpt.com/backend-api/codex` 或以 `/anthropic` 结尾，推断协议。
+
+最后一条规则特别巧妙：URL 以 `/anthropic` 结尾的端点（如 MiniMax 的 `https://api.minimax.io/anthropic`）虽然不是 Anthropic 官方 API，但它们使用 Anthropic Messages API 格式。通过后缀匹配而不是域名匹配，一条规则就覆盖了所有第三方 Anthropic 兼容端点。
+
+在协议确定之后，还有一个后置校正步骤：
+
+```python
+# run_agent.py:678-682
+if self.api_mode == "chat_completions" and (
+    self._is_direct_openai_url()
+    or self._model_requires_responses_api(self.model)
+):
+    self.api_mode = "codex_responses"
+```
+
+GPT-5.x 系列模型只能通过 Responses API 调用——如果用户配置了 Chat Completions 但使用了这些模型，自动升级到 Responses API。这种"用户意图优先，但自动修正已知不兼容"的策略贯穿整个 Hermes 的设计。
 
 ---
 
-## 4.5 辅助类
+## 4.4 客户端初始化：两条路径
 
-- `IterationBudget` — 迭代次数预算
-- `_SafeWriter` — 安全输出写入器
-- 源锚：`run_agent.py`
+API 模式确定后，`__init__` 根据模式选择不同的客户端初始化路径。这是整个构造函数中最复杂的分支。
 
-> TODO: 辅助类详解
+**路径一：Anthropic 原生模式**（`api_mode == "anthropic_messages"` 且 `provider == "anthropic"`）
+
+```python
+# run_agent.py:833-848
+if self.api_mode == "anthropic_messages":
+    from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
+    _is_native_anthropic = self.provider == "anthropic"
+    effective_key = (api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or "")
+    self.api_key = effective_key
+    self._anthropic_client = build_anthropic_client(effective_key, base_url)
+    self.client = None  # No OpenAI client needed
+```
+
+注意 `self.client = None` 这一行——Anthropic 模式下不创建 OpenAI 客户端。这意味着后续所有使用 `self.client` 的代码路径必须先检查 `api_mode`，否则会 NonePointerError。这是 Hermes 架构中少数几个"多协议共存"带来的复杂性之一。
+
+**路径二：OpenAI 兼容模式**（所有其他情况）
+
+这条路径的逻辑更复杂，因为 OpenAI SDK 被用作所有非 Anthropic 提供商的统一客户端——从 OpenRouter 到 Nous Portal 到自定义端点。客户端构建需要处理提供商特定的 headers：
+
+```python
+# run_agent.py:862-877
+if "openrouter" in effective_base.lower():
+    client_kwargs["default_headers"] = {
+        "HTTP-Referer": "https://hermes-agent.nousresearch.com",
+        "X-OpenRouter-Title": "Hermes Agent",
+    }
+elif "api.githubcopilot.com" in effective_base.lower():
+    from hermes_cli.models import copilot_default_headers
+    client_kwargs["default_headers"] = copilot_default_headers()
+elif "api.kimi.com" in effective_base.lower():
+    client_kwargs["default_headers"] = {"User-Agent": "KimiCLI/1.30.0"}
+```
+
+每个提供商都有自己的 header 需求——OpenRouter 需要 Referer 和 Title，GitHub Copilot 需要认证 headers，Kimi 需要特定的 User-Agent。如果没有显式凭据传入，`__init__` 会通过 `resolve_provider_client()` 路由器自动解析。
+
+---
+
+## 4.5 核心状态字段全景
+
+`__init__` 的后半段初始化了大量状态字段。这些字段可以分为六个生命周期层：
+
+**层一：不可变配置**（初始化后不再改变）
+
+这些字段在 `__init__` 中设置一次，在整个 Agent 生命周期中保持不变。它们定义了 Agent "是什么"。
+
+```python
+self.model = model                    # 模型名称
+self.max_iterations = max_iterations  # 最大迭代次数
+self.tool_delay = tool_delay          # 工具调用间延迟
+self.save_trajectories = save_trajectories
+self.quiet_mode = quiet_mode
+self.platform = platform              # "cli", "telegram", "discord" 等
+```
+
+**层二：会话级状态**（每次 `run_conversation()` 开始时重置）
+
+这些字段跟踪当前对话轮次的进度：
+
+```python
+# run_agent.py:7601-7611
+self._invalid_tool_retries = 0
+self._invalid_json_retries = 0
+self._empty_content_retries = 0
+self._incomplete_scratchpad_retries = 0
+self._codex_incomplete_retries = 0
+self._thinking_prefill_retries = 0
+self._last_content_with_tools = None
+```
+
+注意 `_turns_since_memory` 和 `_iters_since_skill` **不在**这个列表里——它们跨 `run_conversation()` 调用持续累积（第 7632 行的注释明确说明了这一点），因为记忆和技能的推送频率需要跨轮次计算。
+
+**层三：迭代预算**
+
+```python
+# run_agent.py:619
+self.iteration_budget = iteration_budget or IterationBudget(max_iterations)
+```
+
+每次 `run_conversation()` 调用会创建一个新的 `IterationBudget`（第 7635 行）。但如果 Agent 是子代理（subagent），它会继承父代理传入的 budget——这意味着父子共享迭代预算。IterationBudget 的设计将在 4.7 节详细分析。
+
+**层四：上下文压缩器**
+
+```python
+# run_agent.py:1298-1311
+self.context_compressor = ContextCompressor(
+    model=self.model,
+    threshold_percent=compression_threshold,
+    protect_first_n=3,
+    protect_last_n=compression_protect_last,
+    summary_target_ratio=compression_target_ratio,
+    # ...
+)
+self.compression_enabled = compression_enabled
+```
+
+压缩器是一个独立的有状态对象，跟踪 token 用量和压缩次数。它的详细工作方式在第 7 章展开。
+
+**层五：记忆与技能**
+
+```python
+# run_agent.py:1089-1112
+self._memory_store = None
+self._memory_enabled = False
+self._user_profile_enabled = False
+self._memory_nudge_interval = 10
+self._turns_since_memory = 0
+self._iters_since_skill = 0
+```
+
+`_memory_nudge_interval` 控制每隔多少轮触发一次记忆审查提示。`_iters_since_skill` 控制技能创建提示的频率。这两个计数器在 `run_conversation()` 的入口和出口分别递增和检查——形成了第 1 章描述的"封闭学习循环"的驱动力。
+
+**层六：中断与并发**
+
+```python
+# run_agent.py:711-720
+self._interrupt_requested = False
+self._interrupt_message = None
+self._execution_thread_id: int | None = None
+self._client_lock = threading.RLock()
+self._delegate_depth = 0
+self._active_children = []
+self._active_children_lock = threading.Lock()
+```
+
+中断机制是 Gateway 模式的刚需——当用户在 Telegram 上发送新消息时，正在运行的 Agent 循环必须被中断。`_interrupt_requested` 是一个简单的布尔标志，主循环在每次迭代开始时检查它（第 5 章详述）。`_active_children` 列表用于级联中断——中断父代理时同时中断所有子代理。
+
+---
+
+## 4.6 三条实例化路径
+
+AIAgent 有三个主要的调用者，每个调用者的参数注入方式不同。
+
+**CLI 路径**：`HermesCLI` 在 `cli.py` 中通过 `runtime_provider` 解析器获取凭据，然后直接构造 AIAgent。CLI 独有的特性是 `clarify_callback`（通过 prompt_toolkit 获取用户输入）和 `thinking_callback`（驱动 TUI 的思考动画）。
+
+**Gateway 路径**：`GatewayRunner` 在 `gateway/run.py` 中为每个收到的消息创建一个新的 AIAgent 实例。这意味着 Gateway 模式下 Agent 的实例级状态（如 `_turns_since_memory`）在每条消息之间重置——类级别的状态（如 `_context_pressure_last_warned`）用于弥补这一点。
+
+```python
+# run_agent.py:500-505
+class AIAgent:
+    # Class-level context pressure dedup (survives across instances)
+    _context_pressure_last_warned: dict = {}
+    _CONTEXT_PRESSURE_COOLDOWN = 300
+```
+
+这个 `dict` 是类变量，在 Gateway 的同一进程内跨所有 AIAgent 实例共享。它解决了一个微妙的问题：Gateway 每次消息创建新 Agent，但用户不想每条消息都收到"上下文快满了"的警告。
+
+**ACP 路径**：`acp_adapter/entry.py` 通过 ACP 协议接收 IDE 的请求。ACP 路径的独特之处在于 `acp_command` 和 `acp_args` 参数——它们指向 Copilot ACP 的命令行入口，用于构建 Copilot ACP 客户端。
+
+三条路径最终都汇入同一个 `run_conversation()` 方法。这就是单一 AIAgent 类的价值——不管消息从哪里来，对话循环的行为保证是完全一致的。
+
+---
+
+## 4.7 IterationBudget：线程安全的迭代控制器
+
+`IterationBudget` 是 `run_agent.py` 中定义的第一个辅助类（第 169 行），也是理解 Agent 行为边界的关键：
+
+```python
+# run_agent.py:169-211
+class IterationBudget:
+    """Thread-safe iteration counter for an agent."""
+
+    def __init__(self, max_total: int):
+        self.max_total = max_total
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def consume(self) -> bool:
+        """Try to consume one iteration. Returns True if allowed."""
+        with self._lock:
+            if self._used >= self.max_total:
+                return False
+            self._used += 1
+            return True
+
+    def refund(self) -> None:
+        """Give back one iteration (e.g. for execute_code turns)."""
+        with self._lock:
+            if self._used > 0:
+                self._used -= 1
+
+    @property
+    def remaining(self) -> int:
+        with self._lock:
+            return max(0, self.max_total - self._used)
+```
+
+三个方法，三个语义：
+
+- `consume()` 是一个**原子的 test-and-set**：检查是否还有余额，如果有则扣减一次。返回 `False` 意味着"你不能再调用 API 了"。
+- `refund()` 是一个**退款机制**：`execute_code` 工具的程序化 tool calling 不消耗父代理的预算（因为它是用户明确请求的代码执行，不应计入 Agent 的自主迭代次数）。
+- `remaining` 是一个只读属性，用于显示和日志。
+
+为什么需要线程安全？因为子代理可以在 ThreadPoolExecutor 中并行运行（`delegate_task` 工具支持并行子任务），多个子代理可能同时尝试消耗同一个 budget。
+
+文档注释中有一个重要的设计细节：
+
+> Each subagent gets an independent budget capped at `delegation.max_iterations` (default 50).
+
+子代理拥有独立的 budget，不与父代理共享。这意味着一个 `max_iterations=90` 的父代理可以启动两个 `max_iterations=50` 的子代理，总迭代次数可达 190。这是有意为之的——子代理的任务独立性意味着它们不应互相竞争预算。
+
+---
+
+## 4.8 _SafeWriter：让崩溃变成沉默
+
+`_SafeWriter` 出现在 AIAgent 之前（第 112 行），它解决的问题在注释中描述得很清楚：
+
+```python
+# run_agent.py:112-159
+class _SafeWriter:
+    """Transparent stdio wrapper that catches OSError/ValueError
+    from broken pipes."""
+
+    def write(self, data):
+        try:
+            return self._inner.write(data)
+        except (OSError, ValueError):
+            return len(data) if isinstance(data, str) else 0
+
+    def flush(self):
+        try:
+            self._inner.flush()
+        except (OSError, ValueError):
+            pass
+```
+
+当 Hermes 作为 systemd 服务、Docker 容器或无头守护进程运行时，stdout/stderr 管道可能在 Agent 运行过程中断开。任何 `print()` 调用都会抛出 `OSError: [Errno 5] Input/output error`，如果异常处理器自己也尝试 print——双重故障，进程崩溃。
+
+`_SafeWriter` 的策略很简单：吞掉所有 I/O 错误。这不是最优雅的解决方案，但它解决了一个真实的生产问题——Gateway 模式下的 Agent 不应该因为一个日志输出失败就终止整个会话。
+
+`_install_safe_stdio()` 在 `__init__` 的第一行被调用，也在 `run_conversation()` 的入口再次调用——双重保险。
+
+---
+
+## 4.9 生命周期时序
+
+AIAgent 的完整生命周期可以用四个阶段描述：
+
+```
+┌──────────────┐    ┌──────────────────┐    ┌────────────────────┐    ┌──────────────┐
+│  1. 构造      │───▶│  2. 系统提示构建  │───▶│  3. 对话循环        │───▶│  4. 清理      │
+│  __init__()  │    │  _build_system   │    │  run_conversation  │    │  cleanup_*   │
+│              │    │  _prompt()       │    │  () — N 轮         │    │              │
+└──────────────┘    └──────────────────┘    └────────────────────┘    └──────────────┘
+  50+ params          7 层组装               while loop              VM/浏览器释放
+  客户端创建           缓存到 session         工具执行                 会话持久化
+  工具加载            一次构建               流式输出                 轨迹保存
+  记忆加载                                   压缩/降级
+```
+
+阶段 1（构造）在上文已经详细分析。阶段 2（系统提示构建）在第 6 章展开。阶段 3（对话循环）是第 5 章的主题。阶段 4（清理）分散在多个方法中——`cleanup_vm()` 释放远程终端环境，`cleanup_browser()` 关闭 Playwright 浏览器，`_persist_session()` 将消息写入 SQLite。
+
+在 Gateway 模式下，阶段 1-4 对每条消息都完整执行一次。在 CLI 模式下，阶段 1 只执行一次，阶段 3 对每次用户输入重复执行。这种差异通过 `conversation_history` 参数桥接——Gateway 每次都传入完整的历史，CLI 维护一个持续增长的消息列表。
+
+---
+
+## 4.10 配置的三层优先级
+
+AIAgent 的配置来源有三层优先级，从高到低：
+
+1. **构造参数** — 直接传入 `__init__` 的值，最高优先级
+2. **config.yaml** — 通过 `_load_agent_config()` 加载的用户配置
+3. **硬编码默认值** — 参数签名中的默认值
+
+这个优先级在 `__init__` 中通过一个固定模式体现——先加载 config，然后只在构造参数未指定时使用 config 值：
+
+```python
+# run_agent.py:1082-1087
+try:
+    from hermes_cli.config import load_config as _load_agent_config
+    _agent_cfg = _load_agent_config()
+except Exception:
+    _agent_cfg = {}
+```
+
+config.yaml 的加载被包裹在 `try/except` 中，失败时回退到空字典。这意味着 Hermes 可以在没有任何配置文件的情况下运行——所有功能都有硬编码的默认值。这是"零配置即可运行"哲学的体现。
+
+压缩配置是一个典型例子：
+
+```python
+# run_agent.py:1210-1217
+_compression_cfg = _agent_cfg.get("compression", {})
+compression_threshold = float(_compression_cfg.get("threshold", 0.50))
+compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
+compression_summary_model = _compression_cfg.get("summary_model") or None
+```
+
+默认阈值是 50%——当 prompt tokens 达到模型上下文窗口的一半时触发压缩。用户可以在 config.yaml 中覆盖，但不需要——默认值适用于大多数场景。
+
+---
+
+## 4.11 上下文引擎的可插拔选择
+
+`__init__` 的最后一个重要段落是上下文引擎的选择。Hermes 支持用自定义引擎替换默认的 ContextCompressor（第 7 章详述），选择逻辑是 config-driven 的：
+
+```python
+# run_agent.py:1255-1311
+_engine_name = _ctx_cfg.get("engine", "compressor") or "compressor"
+
+if _engine_name != "compressor":
+    try:
+        from plugins.context_engine import load_context_engine
+        _selected_engine = load_context_engine(_engine_name)
+    except Exception:
+        pass
+
+    if _selected_engine is None:
+        try:
+            from hermes_cli.plugins import get_plugin_context_engine
+            _candidate = get_plugin_context_engine()
+            if _candidate and _candidate.name == _engine_name:
+                _selected_engine = _candidate
+        except Exception:
+            pass
+
+if _selected_engine is not None:
+    self.context_compressor = _selected_engine
+else:
+    self.context_compressor = ContextCompressor(...)
+```
+
+三级加载尝试：先从 `plugins/context_engine/<name>/` 目录加载，然后从通用插件系统加载，最后回退到内置的 ContextCompressor。这个模式与记忆提供商的加载模式一致（第 4.5 节）——Hermes 的所有可插拔组件都遵循同样的"config → plugin dir → general plugin → built-in"优先级。
+
+---
+
+## 4.12 本章为什么重要
+
+AIAgent 类是 Hermes Agent 的引力中心。后续每一章都在探索这个类的某个侧面：
+
+- **第 5 章**深入 `run_conversation()` 的 while 循环——AIAgent 最复杂的方法
+- **第 6 章**展开 `_build_system_prompt()` 的七层组装逻辑
+- **第 7 章**分析 `context_compressor` 字段背后的压缩引擎
+- **第 8 章**解构 `api_mode` 带来的多协议适配
+- **第 9 章**追踪 `_fallback_chain` 和 `_credential_pool` 的降级路径
+
+理解了 `__init__` 的参数分区和状态字段层次，你就拥有了阅读后续章节的坐标系。
 
 ---
 
 ## 速查表
 
-| 文件 | 角色 |
-|------|------|
-| `run_agent.py` | AIAgent 类定义 |
-| `cli.py` | CLI 实例化路径 |
-| `gateway/run.py` | Gateway 实例化路径 |
-| `acp_adapter/entry.py` | ACP 实例化路径 |
+| 文件 | 行号 | 角色 |
+|------|------|------|
+| `run_agent.py` | 112-159 | `_SafeWriter` — 安全 stdio 包装器 |
+| `run_agent.py` | 169-211 | `IterationBudget` — 线程安全迭代计数器 |
+| `run_agent.py` | 492 | `class AIAgent` — 核心 Agent 类 |
+| `run_agent.py` | 516-573 | `__init__` 签名 — 50+ 构造参数 |
+| `run_agent.py` | 645-661 | API 模式自动检测逻辑 |
+| `run_agent.py` | 833-848 | Anthropic 原生客户端初始化 |
+| `run_agent.py` | 854-936 | OpenAI 兼容客户端初始化 |
+| `run_agent.py` | 950-973 | Fallback 链配置 |
+| `run_agent.py` | 976-996 | 工具加载与过滤 |
+| `run_agent.py` | 1089-1181 | 记忆系统初始化 |
+| `run_agent.py` | 1255-1337 | 上下文引擎选择与初始化 |
+| `cli.py` | — | CLI 实例化路径 |
+| `gateway/run.py` | — | Gateway 实例化路径（每消息新建） |
+| `acp_adapter/entry.py` | — | ACP 实例化路径 |
