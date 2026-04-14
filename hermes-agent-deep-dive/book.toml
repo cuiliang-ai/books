@@ -1,0 +1,16 @@
+[book]
+title = "Hermes Agent Deep Dive"
+authors = ["Liang Cui"]
+description = "Nous Research 自进化 AI Agent 源码深度解析 — 基于 Python 源码全面剖析 Agentic Loop、工具生态、学习闭环、多平台网关"
+language = "zh"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "coal"
+site-url = "/hermes-agent-deep-dive/"
+additional-css = ["custom.css"]
