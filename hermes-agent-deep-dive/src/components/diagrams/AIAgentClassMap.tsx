@@ -7,11 +7,11 @@ import { motion, AnimatePresence } from 'framer-motion';
 interface Group { name: string; icon: string; items: string[]; desc: string; }
 
 const groups: Group[] = [
-  { name: '构造参数', icon: '\u{1f3d7}\ufe0f', items: ['model', 'system_message', 'api_key', 'tools', 'terminal_env', 'api_mode', 'stream_delta_callback', 'tool_progress_callback'], desc: 'AIAgent.__init__() 的 45 个参数中最关键的 8 个。model 决定推理引擎，tools 定义能力范围，callback 连接入口层。' },
-  { name: '状态字段', icon: '\u{1f4ca}', items: ['_cached_system_prompt', '_memory_store', '_credential_pool', '_iteration_budget', '_turns_since_memory', '_iters_since_skill', '_task_id', '_context_engine'], desc: '运行时状态字段。_cached_system_prompt 缓存七层组装结果；Nudge 计数器追踪记忆和技能刷新时机；_context_engine 管理上下文压缩。' },
-  { name: '核心方法', icon: '\u2699\ufe0f', items: ['run_conversation()', '_build_system_prompt()', '_compress_context()', '_interruptible_streaming_api_call()', '_execute_tool_calls()', '_sanitize_api_messages()'], desc: '构成主循环的六大方法。run_conversation() 是入口（7544 行），_build_system_prompt() 组装七层 Prompt，_compress_context() 管理上下文窗口。' },
-  { name: '工具管理', icon: '\u{1f9f0}', items: ['_discover_tools()', '_resolve_toolset()', '_available_tools', '_tool_registry', 'model_tools.py'], desc: '工具的发现、注册、解析链。_discover_tools() 扫描注册表，_resolve_toolset() 解析用户配置的工具集合组合。' },
-  { name: '学习系统', icon: '\u{1f4d6}', items: ['_spawn_background_review()', '_flush_messages_to_session_db()', '_memory_store', '_skill_nudge_interval'], desc: '自进化的核心。影子 Agent 后台审查对话，记忆和 Skill 自动持久化。这是 Hermes 与其他 Agent 的本质区别。' },
+  { name: '构造参数', icon: '🏗️', items: ['model', 'system_message', 'api_key', 'tools', 'terminal_env', 'api_mode', 'stream_delta_callback', 'tool_progress_callback'], desc: 'AIAgent.__init__() 的 45 个参数中最关键的 8 个。model 决定推理引擎，tools 定义能力范围，callback 连接入口层。' },
+  { name: '状态字段', icon: '📊', items: ['_cached_system_prompt', '_memory_store', '_credential_pool', '_iteration_budget', '_turns_since_memory', '_iters_since_skill', '_task_id', '_context_engine'], desc: '运行时状态字段。_cached_system_prompt 缓存七层组装结果；Nudge 计数器追踪记忆和技能刷新时机；_context_engine 管理上下文压缩。' },
+  { name: '核心方法', icon: '⚙️', items: ['run_conversation()', '_build_system_prompt()', '_compress_context()', '_interruptible_streaming_api_call()', '_execute_tool_calls()', '_sanitize_api_messages()'], desc: '构成主循环的六大方法。run_conversation() 是入口（7544 行），_build_system_prompt() 组装七层 Prompt，_compress_context() 管理上下文窗口。' },
+  { name: '工具管理', icon: '🧰', items: ['_discover_tools()', '_resolve_toolset()', '_available_tools', '_tool_registry', 'model_tools.py'], desc: '工具的发现、注册、解析链。_discover_tools() 扫描注册表，_resolve_toolset() 解析用户配置的工具集合组合。' },
+  { name: '学习系统', icon: '📖', items: ['_spawn_background_review()', '_flush_messages_to_session_db()', '_memory_store', '_skill_nudge_interval'], desc: '自进化的核心。影子 Agent 后台审查对话，记忆和 Skill 自动持久化。这是 Hermes 与其他 Agent 的本质区别。' },
 ];
 
 function useTheme(): 'light' | 'dark' { const [t, setT] = useState<'light'|'dark'>('light'); useEffect(() => { const r = document.documentElement; const d = () => setT(r.dataset.theme==='dark'?'dark':'light'); d(); const o = new MutationObserver(d); o.observe(r, {attributes:true,attributeFilter:['data-theme']}); return ()=>o.disconnect(); }, []); return t; }

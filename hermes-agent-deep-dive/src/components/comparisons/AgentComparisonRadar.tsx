@@ -6,14 +6,14 @@ import { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 
 const dimensions = [
-  { key: 'learning', label: '\u81ea\u8fdb\u5316\u5b66\u4e60' },
-  { key: 'multiModel', label: '\u591a\u6a21\u578b\u652f\u6301' },
-  { key: 'platforms', label: '\u591a\u5e73\u53f0\u7f51\u5173' },
-  { key: 'tools', label: '\u5de5\u5177\u751f\u6001' },
-  { key: 'security', label: '\u5b89\u5168\u7eb5\u6df1' },
-  { key: 'rl', label: 'RL \u8bad\u7ec3' },
-  { key: 'community', label: '\u793e\u533a/\u751f\u6001' },
-  { key: 'codeEdit', label: '\u4ee3\u7801\u7f16\u8f91' },
+  { key: 'learning', label: '自进化学习' },
+  { key: 'multiModel', label: '多模型支持' },
+  { key: 'platforms', label: '多平台网关' },
+  { key: 'tools', label: '工具生态' },
+  { key: 'security', label: '安全纵深' },
+  { key: 'rl', label: 'RL 训练' },
+  { key: 'community', label: '社区/生态' },
+  { key: 'codeEdit', label: '代码编辑' },
 ];
 
 interface AgentProfile {
@@ -28,25 +28,25 @@ const agents: AgentProfile[] = [
     name: 'Hermes Agent',
     color: '#d97757',
     scores: { learning: 95, multiModel: 95, platforms: 95, tools: 90, security: 80, rl: 90, community: 50, codeEdit: 75 },
-    summary: '\u5168\u7ef4\u5ea6\u81ea\u8fdb\u5316 Agent\uff0c\u5f3a\u9879\u662f\u5b66\u4e60\u95ed\u73af\u3001\u591a\u6a21\u578b\u3001\u591a\u5e73\u53f0\u3001RL \u8bad\u7ec3\u3002\u793e\u533a\u751f\u6001\u5c1a\u5728\u65e9\u671f\u3002',
+    summary: '全维度自进化 Agent，强项是学习闭环、多模型、多平台、RL 训练。社区生态尚在早期。',
   },
   {
     name: 'Claude Code',
     color: '#6366f1',
     scores: { learning: 30, multiModel: 10, platforms: 40, tools: 85, security: 90, rl: 10, community: 90, codeEdit: 95 },
-    summary: 'Anthropic \u5b98\u65b9\u7f16\u7a0b\u52a9\u624b\uff0c\u4ee3\u7801\u7f16\u8f91\u548c\u5b89\u5168\u6027\u6781\u5f3a\uff0c\u4f46\u9501\u5b9a Claude \u6a21\u578b\uff0c\u65e0\u5b66\u4e60\u95ed\u73af\u3002',
+    summary: 'Anthropic 官方编程助手，代码编辑和安全性极强，但锁定 Claude 模型，无学习闭环。',
   },
   {
     name: 'Aider',
     color: '#10b981',
     scores: { learning: 20, multiModel: 80, platforms: 10, tools: 40, security: 40, rl: 5, community: 85, codeEdit: 90 },
-    summary: 'git-aware \u4ee3\u7801\u7f16\u8f91\u4e13\u5bb6\uff0c\u4ee3\u7801\u7f16\u8f91\u548c\u591a\u6a21\u578b\u652f\u6301\u5f3a\uff0c\u4f46\u4e0d\u662f\u901a\u7528 Agent\u3002',
+    summary: 'git-aware 代码编辑专家，代码编辑和多模型支持强，但不是通用 Agent。',
   },
   {
     name: 'Codex CLI',
     color: '#f59e0b',
     scores: { learning: 15, multiModel: 20, platforms: 15, tools: 50, security: 70, rl: 5, community: 70, codeEdit: 80 },
-    summary: 'OpenAI \u5b98\u65b9\u7ec8\u7aef\u5de5\u5177\uff0c\u7b80\u6d01\u9ad8\u6548\uff0c\u4f46\u529f\u80fd\u8303\u56f4\u6709\u9650\u3002',
+    summary: 'OpenAI 官方终端工具，简洁高效，但功能范围有限。',
   },
 ];
 
@@ -148,7 +148,7 @@ export default function AgentComparisonRadar() {
           color: palette.accent,
         }}
       >
-        \u56db\u4ea7\u54c1\u96f7\u8fbe\u56fe\u5bf9\u6bd4 \u2014 \u70b9\u51fb\u56fe\u4f8b\u5207\u6362\u663e\u793a
+        四产品雷达图对比 — 点击图例切换显示
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 400 }}>
@@ -304,7 +304,7 @@ export default function AgentComparisonRadar() {
             </motion.div>
           ) : (
             <div style={{ color: palette.textMuted, fontSize: 13, fontStyle: 'italic', marginTop: 12 }}>
-              \u5c06\u9f20\u6807\u60ac\u505c\u5728\u4ea7\u54c1\u540d\u79f0\u6216\u96f7\u8fbe\u56fe\u533a\u57df\u4e0a\u67e5\u770b\u8be6\u60c5
+              将鼠标悬停在产品名称或雷达图区域上查看详情
             </div>
           )}
         </div>

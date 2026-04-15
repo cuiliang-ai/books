@@ -17,39 +17,39 @@ const nodes: LoopNode[] = [
   {
     id: 'execute',
     label: '执行对话',
-    icon: '\u{1f4ac}',
+    icon: '💬',
     detail:
       'Agent 与用户进行多轮对话，每轮可能涉及工具调用、代码执行、文件操作等。执行过程中，Nudge 计数器持续追踪轮次数和迭代数。',
     funcs: ['run_conversation()', '_turns_since_memory++', '_iters_since_skill++'],
   },
   {
     id: 'nudge',
-    label: 'Nudge \u68c0\u6d4b',
-    icon: '\u{1f514}',
+    label: 'Nudge 检测',
+    icon: '🔔',
     detail:
       '对话结束时检查两个阈值：记忆 Nudge（默认每 3 轮用户对话触发）和技能 Nudge（默认每 25 次工具迭代触发）。阈值到达时设置标志位，触发后台审查。',
     funcs: ['_memory_nudge_interval', '_skill_nudge_interval', '_should_review_memory'],
   },
   {
     id: 'shadow',
-    label: '\u5f71\u5b50 Agent',
-    icon: '\u{1f47b}',
+    label: '影子 Agent',
+    icon: '👻',
     detail:
       '_spawn_background_review() 在 daemon 线程中启动一个独立的 AIAgent。影子 Agent 共享原始会话的 _memory_store 引用，回顾对话快照，自主决定记忆哪些内容、创建哪些 Skill。',
     funcs: ['_spawn_background_review()', 'AIAgent(daemon=True)', 'memory()', 'skill_manage()'],
   },
   {
     id: 'persist',
-    label: '\u6301\u4e45\u5316',
-    icon: '\u{1f4be}',
+    label: '持久化',
+    icon: '💾',
     detail:
       '影子 Agent 的输出写入三个存储：MEMORY.md/USER.md（精炼事实）、SKILL.md 文件（程序化知识）、SessionDB（对话快照 + FTS5 索引）。所有写入使用原子操作 + 文件锁。',
     funcs: ['MEMORY.md', 'USER.md', 'SKILL.md', 'SessionDB.save_session()'],
   },
   {
     id: 'recall',
-    label: '\u4e0b\u6b21\u4f1a\u8bdd\u53ec\u56de',
-    icon: '\u{1f504}',
+    label: '下次会话召回',
+    icon: '🔄',
     detail:
       '下次会话启动时：load_from_disk() 加载最新记忆生成冻结快照注入 System Prompt；Skills 系统通过渐进式披露提供程序化知识；session_search 通过 FTS5 全文检索历史经验。Agent 越来越"懂"用户。',
     funcs: ['load_from_disk()', 'build_skills_system_prompt()', 'session_search()'],
@@ -149,7 +149,7 @@ export default function LearningLoopDiagram() {
             fontSize: 14,
           }}
         >
-          {playing ? '\u23f9 \u505c\u6b62' : '\u25b6 \u64ad\u653e\u5faa\u73af'}
+          {playing ? '⏹ 停止' : '▶ 播放循环'}
         </button>
         <button
           onClick={() => { stopTimer(); setSelected(null); }}
@@ -163,7 +163,7 @@ export default function LearningLoopDiagram() {
             fontSize: 14,
           }}
         >
-          \u91cd\u7f6e
+          重置
         </button>
       </div>
 
@@ -225,9 +225,9 @@ export default function LearningLoopDiagram() {
                 lineHeight: 1.4,
               }}
             >
-              \u5c01\u95ed\u5b66\u4e60
+              封闭学习
               <br />
-              \u5faa\u73af
+              循环
             </div>
             {/* SVG arrows between nodes */}
             <svg
@@ -299,7 +299,7 @@ export default function LearningLoopDiagram() {
                 animate={{ opacity: 1 }}
                 style={{ color: palette.textMuted, fontSize: 14, fontStyle: 'italic' }}
               >
-                \u2190 \u70b9\u51fb\u5faa\u73af\u8282\u70b9\u6216\u64ad\u653e\u67e5\u770b\u8be6\u60c5
+                ← 点击循环节点或播放查看详情
               </motion.div>
             )}
           </AnimatePresence>

@@ -5,12 +5,12 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const backends = [
-  { name: 'Local', icon: '\u{1f4bb}', pros: ['零延迟', '完整文件系统', '原生性能'], cons: ['无隔离', '安全风险'], desc: '直接在宿主机执行命令。subprocess.run() 驱动，支持 CWD 追踪和超时控制。' },
-  { name: 'Docker', icon: '\u{1f433}', pros: ['进程隔离', '可复现环境', '持久文件系统'], cons: ['启动延迟', '需要 Docker'], desc: '每个 task_id 一个容器。bind mount 实现持久文件系统，docker exec 执行命令。' },
-  { name: 'SSH', icon: '\u{1f510}', pros: ['远程执行', '复用现有基础设施'], cons: ['网络延迟', '需要密钥配置'], desc: 'paramiko 库驱动。支持密钥认证和密码认证，持久 SSH session 复用连接。' },
-  { name: 'Modal', icon: '\u2601\ufe0f', pros: ['无服务器', '按需 GPU', '自动扩缩'], cons: ['冷启动延迟', '需要 Modal 账号'], desc: 'Modal.com 无服务器平台集成。支持 GPU 实例和自定义镜像，休眠-唤醒模式。' },
-  { name: 'Daytona', icon: '\u{1f3d7}\ufe0f', pros: ['云开发环境', 'IDE 集成'], cons: ['需要 Daytona 服务'], desc: 'Daytona SDK 集成，云端开发环境。支持预配置的开发容器和工作区。' },
-  { name: 'Singularity', icon: '\u{1f52c}', pros: ['HPC 兼容', '无需 root', '可复现'], cons: ['主要用于 HPC 集群'], desc: 'Singularity/Apptainer 容器。面向 HPC 集群环境，用户级容器运行，无需特权。' },
+  { name: 'Local', icon: '💻', pros: ['零延迟', '完整文件系统', '原生性能'], cons: ['无隔离', '安全风险'], desc: '直接在宿主机执行命令。subprocess.run() 驱动，支持 CWD 追踪和超时控制。' },
+  { name: 'Docker', icon: '🐳', pros: ['进程隔离', '可复现环境', '持久文件系统'], cons: ['启动延迟', '需要 Docker'], desc: '每个 task_id 一个容器。bind mount 实现持久文件系统，docker exec 执行命令。' },
+  { name: 'SSH', icon: '🔐', pros: ['远程执行', '复用现有基础设施'], cons: ['网络延迟', '需要密钥配置'], desc: 'paramiko 库驱动。支持密钥认证和密码认证，持久 SSH session 复用连接。' },
+  { name: 'Modal', icon: '☁️', pros: ['无服务器', '按需 GPU', '自动扩缩'], cons: ['冷启动延迟', '需要 Modal 账号'], desc: 'Modal.com 无服务器平台集成。支持 GPU 实例和自定义镜像，休眠-唤醒模式。' },
+  { name: 'Daytona', icon: '🏗️', pros: ['云开发环境', 'IDE 集成'], cons: ['需要 Daytona 服务'], desc: 'Daytona SDK 集成，云端开发环境。支持预配置的开发容器和工作区。' },
+  { name: 'Singularity', icon: '🔬', pros: ['HPC 兼容', '无需 root', '可复现'], cons: ['主要用于 HPC 集群'], desc: 'Singularity/Apptainer 容器。面向 HPC 集群环境，用户级容器运行，无需特权。' },
 ];
 
 function useTheme(): 'light'|'dark' { const [t,setT]=useState<'light'|'dark'>('light'); useEffect(()=>{const r=document.documentElement;const d=()=>setT(r.dataset.theme==='dark'?'dark':'light');d();const o=new MutationObserver(d);o.observe(r,{attributes:true,attributeFilter:['data-theme']});return()=>o.disconnect();},[]);return t; }

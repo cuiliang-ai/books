@@ -5,12 +5,12 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const entries = [
-  { name: 'CLI', icon: '\u{1f4bb}', file: 'cli.py', desc: 'prompt_toolkit 交互式终端，开发者日常使用的主入口。支持 Slash 命令、多行输入、流式输出。' },
-  { name: 'Gateway', icon: '\u{1f310}', file: 'gateway/run.py', desc: '消息平台网关，一个进程同时服务 Telegram/Discord/Slack 等 15 个平台。asyncio 事件循环驱动。' },
-  { name: 'ACP', icon: '\u{1f50c}', file: 'acp_adapter/', desc: 'Agent Communication Protocol 服务器，面向 IDE（VS Code、Cursor）集成。HTTP JSON-RPC 协议。' },
-  { name: 'MCP Server', icon: '\u{1f9e9}', file: 'mcp_serve.py', desc: 'Model Context Protocol 服务器模式，让其他 Agent 把 Hermes 当作工具使用。stdio 传输。' },
-  { name: 'Batch Runner', icon: '\u{1f4e6}', file: 'batch_runner.py', desc: '批量轨迹生成器，多进程并行运行预定义任务，生成 JSONL 格式训练数据。RL 训练的数据源。' },
-  { name: 'RL CLI', icon: '\u{1f9ea}', file: 'rl_cli.py', desc: 'Atropos RL 训练集成入口。将 Agent 接入强化学习训练流水线，支持 reward shaping。' },
+  { name: 'CLI', icon: '💻', file: 'cli.py', desc: 'prompt_toolkit 交互式终端，开发者日常使用的主入口。支持 Slash 命令、多行输入、流式输出。' },
+  { name: 'Gateway', icon: '🌐', file: 'gateway/run.py', desc: '消息平台网关，一个进程同时服务 Telegram/Discord/Slack 等 15 个平台。asyncio 事件循环驱动。' },
+  { name: 'ACP', icon: '🔌', file: 'acp_adapter/', desc: 'Agent Communication Protocol 服务器，面向 IDE（VS Code、Cursor）集成。HTTP JSON-RPC 协议。' },
+  { name: 'MCP Server', icon: '🧩', file: 'mcp_serve.py', desc: 'Model Context Protocol 服务器模式，让其他 Agent 把 Hermes 当作工具使用。stdio 传输。' },
+  { name: 'Batch Runner', icon: '📦', file: 'batch_runner.py', desc: '批量轨迹生成器，多进程并行运行预定义任务，生成 JSONL 格式训练数据。RL 训练的数据源。' },
+  { name: 'RL CLI', icon: '🧪', file: 'rl_cli.py', desc: 'Atropos RL 训练集成入口。将 Agent 接入强化学习训练流水线，支持 reward shaping。' },
 ];
 
 function useTheme(): 'light' | 'dark' {

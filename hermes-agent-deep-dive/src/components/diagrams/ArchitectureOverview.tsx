@@ -17,7 +17,7 @@ interface Layer {
 const layers: Layer[] = [
   {
     id: 1,
-    title: '第 1 层 \u00b7 入口适配层',
+    title: '第 1 层 · 入口适配层',
     modules: 'CLI (cli.py) / Gateway (gateway/run.py) / ACP / Batch / MCP / RL',
     detail:
       '六种入口形态共享同一个 AIAgent 核心。CLI 面向开发者交互，Gateway 面向 15 个消息平台，ACP 面向 IDE 集成，Batch Runner 面向 RL 训练，MCP Server 面向工具协议。入口层的职责是将外部请求转换为 AIAgent.run_conversation() 调用。',
@@ -26,8 +26,8 @@ const layers: Layer[] = [
   },
   {
     id: 2,
-    title: '第 2 层 \u00b7 智能体引擎',
-    modules: 'AIAgent.run_conversation() \u2014 run_agent.py:7544',
+    title: '第 2 层 · 智能体引擎',
+    modules: 'AIAgent.run_conversation() — run_agent.py:7544',
     detail:
       '核心是 run_conversation() 的 while 循环。PromptBuilder 组装七层 System Prompt，ContextEngine 管理上下文压缩，CredentialPool 实现多凭据轮换和 failover。引擎层是 Hermes 的心脏——所有复杂性在此汇聚。',
     color: '#fff5f0',
@@ -35,8 +35,8 @@ const layers: Layer[] = [
   },
   {
     id: 3,
-    title: '第 3 层 \u00b7 工具编排层',
-    modules: 'model_tools.py \u2192 tools/registry.py \u2192 40+ tools',
+    title: '第 3 层 · 工具编排层',
+    modules: 'model_tools.py → tools/registry.py → 40+ tools',
     detail:
       'ToolRegistry 是中央注册表，ToolSet 定义工具组合的代数运算（交集、并集、差集）。工具发现链通过 _discover_tools 自动扫描并注册。编排层将 LLM 的 tool_call 请求路由到正确的工具实现。',
     color: '#f0f8e8',
@@ -44,7 +44,7 @@ const layers: Layer[] = [
   },
   {
     id: 4,
-    title: '第 4 层 \u00b7 执行后端层',
+    title: '第 4 层 · 执行后端层',
     modules: 'Terminal (6 种) / Browser / Web / File I/O / MCP / Code Exec',
     detail:
       '六种终端后端（Local/Docker/SSH/Modal/Daytona/Singularity）通过 BaseEnvironment 抽象统一。Browser 工具用 Playwright 实现无视觉操控。MCP Client 连接外部工具服务器。每个后端都有独立的沙箱和生命周期管理。',
@@ -53,7 +53,7 @@ const layers: Layer[] = [
   },
   {
     id: 5,
-    title: '第 5 层 \u00b7 持久化与学习层',
+    title: '第 5 层 · 持久化与学习层',
     modules: 'SessionDB / Memory / Skills / Memory Plugins',
     detail:
       'SQLite+FTS5 驱动的 SessionDB 存储对话流水。MEMORY.md/USER.md 以冻结快照模式持久化精炼知识。Skills 系统管理 78 个可复用经验单元。四个子系统形成封闭学习循环——Agent 越用越聪明。',
@@ -160,13 +160,13 @@ export default function ArchitectureOverview() {
               </motion.div>
               {i < layers.length - 1 && (
                 <div style={{ textAlign: 'center', fontSize: 14, color: palette.arrowColor, lineHeight: '18px', userSelect: 'none' }}>
-                  \u2193 调用
+                  ↓ 调用
                 </div>
               )}
             </div>
           ))}
           <div style={{ textAlign: 'center', fontSize: 12, color: palette.textMuted, marginTop: 8, fontStyle: 'italic' }}>
-            \u2191 严格单向调用，下层不回调上层（回调函数除外）
+            ↑ 严格单向调用，下层不回调上层（回调函数除外）
           </div>
         </div>
 
