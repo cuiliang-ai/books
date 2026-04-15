@@ -1,0 +1,467 @@
+---
+title: "第 23 章：Cron 调度与 ACP 集成"
+description: "定时任务投递与 IDE 集成"
+sidebar:
+  order: 23
+---
+
+import CronACPFlow from '../../../components/flows/CronACPFlow.tsx';
+
+> **核心问题**：定时任务如何在无人值守时运行 Agent 并将结果投递到聊天平台？IDE 集成的 ACP 协议如何将 Hermes 嵌入编辑器？
+
+<CronACPFlow client:only="react" />
+
+---
+
+## 23.1 Cron 调度器：tick() 与文件锁
+
+Gateway 每 60 秒从后台线程调用一次 `cron/scheduler.py` 的 `tick()` 函数（第 897 行）。但 tick 也可能被独立的 systemd timer、手动 `hermes cron tick` 或守护进程触发——多个来源重叠时，同一个任务可能被执行两次。文件锁解决了这个问题。
+
+```python
+# cron/scheduler.py:897-926
+def tick(verbose: bool = True, adapters=None, loop=None) -> int:
+    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+
+    lock_fd = None
+    try:
+        lock_fd = open(_LOCK_FILE, "w")
+        if fcntl:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt:
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+    except (OSError, IOError):
+        logger.debug("Tick skipped — another instance holds the lock")
+        if lock_fd is not None:
+            lock_fd.close()
+        return 0
+```
+
+锁文件位于 `~/.hermes/cron/.tick.lock`。Unix 系统使用 `fcntl.flock()` 的非阻塞独占锁（`LOCK_EX | LOCK_NB`），Windows 系统使用 `msvcrt.locking()` 的 `LK_NBLCK` 模式。如果锁已被持有，`tick()` 立即返回 0 而不阻塞等待——避免了 tick 调用堆积。
+
+获取锁后，`tick()` 调用 `get_due_jobs()` 获取到期任务列表，然后逐个执行。注意一个关键的顺序：
+
+```python
+# cron/scheduler.py:939-945
+for job in due_jobs:
+    # Advance next_run_at BEFORE execution.
+    # If the process crashes mid-run, the job won't re-fire on restart.
+    advance_next_run(job["id"])
+
+    success, output, final_response, error = run_job(job)
+```
+
+`advance_next_run()` 在执行**之前**被调用。这意味着如果 `run_job()` 中途崩溃，任务的 `next_run_at` 已经推进到下一个周期——重启时不会重复执行。一次性任务（`kind: "once"`）例外：它们不需要推进，因为失败后应该可以重试。
+
+**SILENT_MARKER**（第 53 行）是 Agent 与调度器之间的一个简单协议：
+
+```python
+# cron/scheduler.py:53
+SILENT_MARKER = "[SILENT]"
+```
+
+当 cron Agent 判断"没有新信息需要报告"时，它的响应以 `[SILENT]` 开头。调度器检测到这个标记后跳过投递，但仍然保存输出到本地文件供审计。这个设计解决了一个常见需求——你希望每小时检查一次系统状态，但只在有异常时才通知用户。
+
+投递结果和错误的处理逻辑：
+
+```python
+# cron/scheduler.py:956-970
+deliver_content = final_response if success else \
+    f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+should_deliver = bool(deliver_content)
+if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+    should_deliver = False
+
+delivery_error = None
+if should_deliver:
+    delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+```
+
+失败的任务**总是投递**（错误消息前缀 ⚠️），不管 SILENT_MARKER。这是有意为之——任务失败本身就是需要用户关注的事件。
+
+`tick()` 最后在 `finally` 块中释放文件锁：
+
+```python
+# cron/scheduler.py:978-986
+finally:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    elif msvcrt:
+        try:
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+        except (OSError, IOError):
+            pass
+    lock_fd.close()
+```
+
+Windows 上的 `msvcrt.locking()` 解锁可能失败（进程已经释放或文件句柄无效），所以有一个额外的 try/except。Unix 的 `fcntl.flock()` 在 `close()` 时自动释放，但显式 `LOCK_UN` 是更好的实践。
+
+`tick()` 的 `adapters` 和 `loop` 参数是 Gateway 进程内调度的关键——当 cron 运行在 Gateway 进程中时，这两个参数让 `_deliver_result` 可以使用 live adapter 路径（支持 E2EE），而不是退回到 standalone HTTP。
+
+---
+
+## 23.2 定时任务配置
+
+任务定义和管理由 `cron/jobs.py` 处理。
+
+**schedule 解析**（第 117 行）支持四种格式，统一为结构化字典：
+
+```python
+# cron/jobs.py:117-203 (simplified)
+def parse_schedule(schedule: str) -> Dict[str, Any]:
+    # "every 30m" → {"kind": "interval", "minutes": 30}
+    if schedule_lower.startswith("every "):
+        minutes = parse_duration(schedule[6:])
+        return {"kind": "interval", "minutes": minutes, ...}
+
+    # "0 9 * * *" → {"kind": "cron", "expr": "0 9 * * *"}
+    parts = schedule.split()
+    if len(parts) >= 5 and all(re.match(r'^[\d\*\-,/]+$', p) for p in parts[:5]):
+        croniter(schedule)  # Validate
+        return {"kind": "cron", "expr": schedule, ...}
+
+    # "2026-02-03T14:00" → {"kind": "once", "run_at": "2026-02-03T14:00:00+08:00"}
+    if 'T' in schedule or re.match(r'^\d{4}-\d{2}-\d{2}', schedule):
+        dt = datetime.fromisoformat(schedule.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.astimezone()  # Interpret as local timezone
+        return {"kind": "once", "run_at": dt.isoformat(), ...}
+
+    # "30m" → one-shot in 30 minutes
+    minutes = parse_duration(schedule)
+    run_at = _hermes_now() + timedelta(minutes=minutes)
+    return {"kind": "once", "run_at": run_at.isoformat(), ...}
+```
+
+cron 表达式的解析和计算依赖 `croniter` 库。如果用户使用 cron 表达式但没有安装 croniter，`parse_schedule` 会抛出一个友好的错误信息指引安装。`parse_duration()`（第 96 行）处理持续时间字符串：
+
+```python
+# cron/jobs.py:96-114
+def parse_duration(s: str) -> int:
+    """Parse duration string into minutes.
+    "30m" → 30, "2h" → 120, "1d" → 1440
+    """
+    s = s.strip().lower()
+    match = re.match(r'^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$', s)
+    if not match:
+        raise ValueError(f"Invalid duration: '{s}'. Use format like '30m', '2h', or '1d'")
+    value = int(match.group(1))
+    unit = match.group(2)[0]  # First char: m, h, or d
+    multipliers = {'m': 1, 'h': 60, 'd': 1440}
+    return value * multipliers[unit]
+```
+
+时区处理是 schedule 解析中最微妙的部分。`_ensure_aware()`（第 206 行）将旧版本存储的 naive datetime 转换为时区感知的 datetime。旧的 naive 时间戳被解释为**系统本地时间**（因为 `datetime.now()` 在创建它们时使用的就是本地时区），然后转换到 Hermes 配置的时区。这保证了跨时区迁移后，已存储的任务时间仍然正确。
+
+**grace period** 机制（`_compute_grace_seconds`，第 252 行）处理"错过的"执行窗口。如果 Gateway 在任务到期时未运行（重启、维护等），重启后任务可能已经"过期"。grace period 设为调度周期的一半（最小 120 秒，最大 2 小时），在此窗口内的过期任务仍会执行，超过则快进到下一个周期。这确保每日任务在 2 小时内可以补执行，而每 5 分钟的频繁任务不会产生堆积。
+
+**任务持久化** 使用 JSON 文件和原子写入：
+
+```python
+# cron/jobs.py:349+ (pattern)
+def save_jobs(jobs):
+    ensure_dirs()
+    data = json.dumps(jobs, indent=2, default=str)
+    tmp_path = JOBS_FILE.with_suffix('.tmp')
+    tmp_path.write_text(data, encoding="utf-8")
+    tmp_path.replace(JOBS_FILE)  # Atomic rename
+    _secure_file(JOBS_FILE)
+```
+
+`tmp_path.replace(JOBS_FILE)` 是 POSIX 原子重命名——写入临时文件再重命名，确保崩溃时不会留下写了一半的 jobs.json。`_secure_file()` 和 `_secure_dir()` 设置 `0o600`/`0o700` 权限，因为任务定义中可能包含敏感的 prompt 内容。
+
+---
+
+## 23.3 任务执行：run_job()
+
+`run_job()`（第 575 行）在独立线程中运行一个完整的 AIAgent 对话。它的配置与 Gateway 的 Agent 有几个关键差异：
+
+```python
+# cron/scheduler.py:731-755
+agent = AIAgent(
+    model=turn_route["model"],
+    api_key=turn_route["runtime"].get("api_key"),
+    # ... provider, base_url, etc.
+    max_iterations=max_iterations,
+    disabled_toolsets=["cronjob", "messaging", "clarify"],
+    quiet_mode=True,
+    skip_context_files=True,  # Don't inject SOUL.md from scheduler cwd
+    skip_memory=True,         # Cron prompts would corrupt user representations
+    platform="cron",
+    session_id=_cron_session_id,
+)
+```
+
+三个 `disabled_toolsets` 的含义：
+
+- `cronjob` — 防止 cron Agent 创建新的 cron 任务（无限递归）
+- `messaging` — 投递由调度器统一处理，Agent 不应自行发送消息
+- `clarify` — 无人值守模式下没有用户可以回答澄清请求
+
+`skip_context_files=True` 防止 cron 进程的工作目录（通常是 `~/.hermes/cron/`）中的 `SOUL.md`、`AGENTS.md` 注入System Prompt词。`skip_memory=True` 更重要——cron 任务的System Prompt词如果包含用户记忆的话，会导致记忆内容在不同场景下被错误引用。
+
+**环境变量注入与清理**。`run_job()` 在 try 块中注入 origin 信息和投递目标到环境变量，在 finally 块中清理：
+
+```python
+# cron/scheduler.py:603-608, 876-885
+# try block:
+if origin:
+    os.environ["HERMES_SESSION_PLATFORM"] = origin["platform"]
+    os.environ["HERMES_SESSION_CHAT_ID"] = str(origin["chat_id"])
+
+# finally block:
+for key in (
+    "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID",
+    "HERMES_SESSION_CHAT_NAME", "HERMES_CRON_AUTO_DELIVER_PLATFORM",
+    "HERMES_CRON_AUTO_DELIVER_CHAT_ID", "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+):
+    os.environ.pop(key, None)
+```
+
+这个注入是为了让 Agent 的 `send_message` 工具知道当前会话的平台和聊天 ID（虽然 cron 禁用了 `messaging` 工具集，但某些 skill 可能直接调用低级发送函数）。finally 清理确保环境变量不会泄漏到下一个任务——如果两个任务有不同的 origin 平台，残留的环境变量会导致消息发送到错误的地方。
+
+**每次重新加载配置**。注意第 612 行 `load_dotenv(str(_hermes_home / ".env"), override=True)`——每次执行都重新加载 `.env` 文件。这意味着用户可以在 cron 任务运行期间更换 API key，下一个任务会自动使用新的 key，无需重启 Gateway。
+
+**智能模型路由**。cron 任务支持 `smart_model_routing`——第 698 行的 `resolve_turn_route()` 根据 prompt 内容选择最合适的模型。简单的状态检查可能用 GPT-4o-mini，复杂的数据分析可能升级到 Claude Sonnet。这与 Gateway 的智能路由共享相同的配置和逻辑（参见第 15 章）。
+
+**提示词构建**（`_build_job_prompt`，第 485 行）在用户 prompt 前注入 cron 执行指南：
+
+```python
+# cron/scheduler.py:518-528
+cron_hint = (
+    "[SYSTEM: You are running as a scheduled cron job. "
+    "DELIVERY: Your final response will be automatically delivered "
+    "to the user — do NOT use send_message or try to deliver "
+    "the output yourself. Just produce your report/output as your "
+    "final response and the system handles the rest. "
+    "SILENT: If there is genuinely nothing new to report, respond "
+    "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
+    "Never combine [SILENT] with content — either report your "
+    "findings normally, or say [SILENT] and nothing more.]\n\n"
+)
+```
+
+这个指南有两个目的：防止 Agent 用 `send_message` 工具自行发送（会绕过投递系统），以及教会 Agent 使用 SILENT_MARKER。
+
+如果任务配置了 `script` 字段，`_run_job_script()`（第 404 行）会先执行数据收集脚本，将输出注入 prompt。脚本必须位于 `~/.hermes/scripts/` 目录内——路径遍历防护通过 `path.relative_to(scripts_dir_resolved)` 确保绝对路径和符号链接都不能逃逸出 scripts 目录。
+
+**不活跃超时**（第 762 行）是 cron 执行的安全网。Agent 的 `run_conversation()` 在子线程中运行，主线程每 5 秒轮询 Agent 的 activity tracker：
+
+```python
+# cron/scheduler.py:776-794
+while True:
+    done, _ = concurrent.futures.wait({_cron_future}, timeout=_POLL_INTERVAL)
+    if done:
+        result = _cron_future.result()
+        break
+    _idle_secs = 0.0
+    if hasattr(agent, "get_activity_summary"):
+        _act = agent.get_activity_summary()
+        _idle_secs = _act.get("seconds_since_activity", 0.0)
+    if _idle_secs >= _cron_inactivity_limit:
+        _inactivity_timeout = True
+        break
+```
+
+默认 600 秒（10 分钟）无活动后超时。注意这是**不活跃**超时而非绝对超时——如果 Agent 持续调用工具或接收 stream token，它可以运行数小时。只有 API 调用卡死或工具挂起时才会触发。
+
+---
+
+## 23.4 跨平台投递
+
+`_deliver_result()`（第 199 行）是 cron 输出到达用户的最后一英里。它有两条路径。
+
+**路径一：live adapter**。当 Gateway 进程内运行 cron 时，`tick()` 传入 `adapters` 字典和 `loop`（事件循环）。投递优先使用 live adapter：
+
+```python
+# cron/scheduler.py:199+
+def _deliver_result(job, content, adapters=None, loop=None):
+    target = _resolve_delivery_target(job)
+    # ...
+    # Try live adapter first (supports E2EE)
+    if adapters and loop:
+        adapter = adapters.get(platform)
+        if adapter:
+            coro = adapter.send(chat_id=chat_id, content=cleaned, metadata=metadata)
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            result = future.result(timeout=30)
+            if result.success:
+                _send_media_via_adapter(adapter, chat_id, media_files, metadata, loop, job)
+                return None  # Success
+```
+
+为什么优先使用 live adapter？因为 Matrix 等平台的 E2EE（端到端加密）要求通过已建立的会话发送消息——standalone HTTP 路径无法加密。live adapter 持有 E2EE 会话的加密状态，可以直接发送加密消息。
+
+**路径二：standalone HTTP**。如果 live adapter 不可用（独立 cron 进程、adapter 断线），使用 `tools/send_message_tool.py` 的 `_send_to_platform()` 函数——它直接调用各平台的 HTTP API。
+
+**投递目标解析**（`_resolve_delivery_target`，第 77 行）支持多种格式：
+
+- `deliver: "local"` — 仅保存到本地文件
+- `deliver: "origin"` — 投递到创建任务时的原始聊天
+- `deliver: "telegram:12345"` — 指定平台和聊天 ID
+- `deliver: "telegram"` — 使用平台的 home channel
+
+安全措施：`_KNOWN_DELIVERY_PLATFORMS`（第 44 行）是一个 frozenset，只允许 17 个已知平台名：
+
+```python
+# cron/scheduler.py:44-48
+_KNOWN_DELIVERY_PLATFORMS = frozenset({
+    "telegram", "discord", "slack", "whatsapp", "signal",
+    "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
+    "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
+})
+```
+
+这防止了通过构造 `deliver: "AWS_SECRET_KEY"` 这样的值来枚举环境变量——不在列表中的平台名不会触发 `os.getenv(f"{platform_name.upper()}_HOME_CHANNEL")` 调用。
+
+**媒体投递**。Agent 的响应可能包含 `MEDIA:/path/to/file` 标签。`_send_media_via_adapter()`（第 167 行）根据文件扩展名路由到适配器的 `send_voice()`、`send_image_file()`、`send_video()` 或 `send_document()` 方法——与 `BasePlatformAdapter._process_message_background()` 中的路由逻辑保持同步。
+
+---
+
+## 23.5 ACP 协议与 IDE 集成
+
+ACP（Agent Communication Protocol）是 Hermes 嵌入 VS Code、Zed、JetBrains 等 IDE 的接口。它通过 **stdio JSON-RPC** 通信——与 LSP（Language Server Protocol）和 MCP（Model Context Protocol）相同的传输机制。
+
+**入口点**（`acp_adapter/entry.py`，86 行）展示了 ACP 最关键的约束：stdout 被 JSON-RPC 独占。
+
+```python
+# acp_adapter/entry.py:23-35
+def _setup_logging() -> None:
+    """Route all logging to stderr so stdout stays clean for ACP stdio."""
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(...)
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+    # Quiet down noisy libraries
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+```
+
+所有日志路由到 stderr。httpx 和 httpcore 被降级到 WARNING——它们的 INFO 级别日志在 ACP 模式下没有价值，反而会干扰 stderr 的可读性。
+
+启动流程：`_load_env()` → `_setup_logging()` → 创建 `HermesACPAgent` → `asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))`。`use_unstable_protocol=True` 表示使用 ACP 协议的最新草案版本（agent-client-protocol 0.9.0+）。
+
+**HermesACPAgent**（`acp_adapter/server.py:93`）继承 `acp.Agent`，实现了 ACP 规范定义的接口：
+
+```python
+# acp_adapter/server.py:93-136
+class HermesACPAgent(acp.Agent):
+    _SLASH_COMMANDS = {
+        "help": "Show available commands",
+        "model": "Show or change current model",
+        "tools": "List available tools",
+        "context": "Show conversation context info",
+        "reset": "Clear conversation history",
+        "compact": "Compress conversation context",
+        "version": "Show Hermes version",
+    }
+```
+
+斜杠命令通过 ACP 的 `AvailableCommandsUpdate` 机制广播给 IDE——IDE 可以在命令面板中展示这些命令。
+
+**会话管理**（`SessionManager`）维护多个并发会话。每个会话持有一个 AIAgent 实例和对话历史。`fork` 和 `resume` 操作允许用户分支或恢复对话。
+
+**Agent 执行**使用线程池：
+
+```python
+# acp_adapter/server.py:70
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="acp-agent")
+```
+
+AIAgent 的 `run_conversation()` 是同步的，所以 ACP 在 4 个线程中并行运行 Agent。每个请求通过 `asyncio.to_thread()` 或 `loop.run_in_executor()` 桥接到线程池。
+
+**MCP 服务器注册**（第 150 行）是 ACP 最强大的功能之一。IDE（如 Zed）可以通过 ACP 协议将自己的 MCP 服务器注册到 Hermes Agent：
+
+```python
+# acp_adapter/server.py:150-184
+async def _register_session_mcp_servers(
+    self,
+    state: SessionState,
+    mcp_servers: list[McpServerStdio | McpServerHttp | McpServerSse] | None,
+) -> None:
+    if not mcp_servers:
+        return
+    from tools.mcp_tool import register_mcp_servers
+
+    config_map: dict[str, dict] = {}
+    for server in mcp_servers:
+        name = server.name
+        if isinstance(server, McpServerStdio):
+            config = {
+                "command": server.command,
+                "args": list(server.args),
+                "env": {item.name: item.value for item in server.env},
+            }
+        else:
+            config = {
+                "url": server.url,
+                "headers": {item.name: item.value for item in server.headers},
+            }
+        config_map[name] = config
+
+    await asyncio.to_thread(register_mcp_servers, config_map)
+```
+
+注册完成后，Agent 的工具列表被刷新——IDE 的 MCP 服务器提供的工具（如文件编辑、项目搜索）变得可用。这意味着 IDE 编辑器提供的上下文（打开的文件、光标位置、LSP 诊断）可以通过 MCP 工具流入 Hermes Agent。
+
+注册过程还会刷新 Agent 的 `valid_tool_names` 集合和System Prompt词缓存——通过 `_invalidate_system_prompt()` 确保新注册的工具出现在System Prompt词的工具描述中。
+
+**认证机制**。`acp_adapter/auth.py` 中的 `detect_provider()` 和 `has_provider()` 检测当前配置的 AI 提供商，决定是否需要用户提供 API key。ACP 的 `AuthenticateResponse` 允许 IDE 弹出认证对话框，用户可以直接在 IDE 中输入 API key。
+
+**事件回调**。`acp_adapter/events.py` 定义了四个回调工厂函数：
+
+- `make_message_cb()` — Agent 的文本回复 → ACP TextContentBlock 流
+- `make_step_cb()` — 工具调用/结果 → ACP 步骤更新
+- `make_thinking_cb()` — 推理过程 → ACP thinking 内容块
+- `make_tool_progress_cb()` — 工具执行进度 → ACP 进度通知
+
+这些回调将 AIAgent 的同步回调接口桥接到 ACP 的异步内容流——IDE 可以实时显示 Agent 的思考过程、工具调用和结果，而不是等到整个对话结束。
+
+**权限管理**。`acp_adapter/permissions.py` 中的 `make_approval_callback()` 将 Agent 的危险命令审批请求转发到 IDE——IDE 弹出确认对话框替代了 Gateway 模式下的 `/approve` 命令。
+
+---
+
+## 23.6 三种运行模式对比
+
+Hermes Agent 有三种运行模式：Gateway、Cron、ACP。它们共享同一个 AIAgent 核心，但在外壳上有本质差异。
+
+| 维度 | Gateway | Cron | ACP |
+|------|---------|------|-----|
+| **触发方式** | 用户消息（实时） | 定时器（60秒心跳） | IDE 请求（按需） |
+| **并发模型** | asyncio 事件循环 + 线程池 | 文件锁互斥 + ThreadPoolExecutor(1) | ThreadPoolExecutor(4) |
+| **消息来源** | 15+ 平台适配器 | jobs.json 的 prompt | ACP JSON-RPC (stdio) |
+| **结果投递** | 适配器 `send()` | `_deliver_result()` 双路径 | ACP 响应流 |
+| **会话持久化** | SessionStore (磁盘) | 无持久化（每次新建） | SessionManager (内存) |
+| **工具限制** | 完整（含 exec 审批） | 禁用 cronjob/messaging/clarify | 完整 + IDE MCP 工具 |
+| **中断支持** | `agent.interrupt()` | 超时后 `agent.interrupt()` | 不支持 |
+| **记忆访问** | 完整 | `skip_memory=True` | 完整 |
+| **上下文文件** | 完整 | `skip_context_files=True` | 完整 |
+
+三者的关系可以这样理解：Gateway 是面向用户的实时界面，Cron 是面向任务的后台工人，ACP 是面向开发者的 IDE 嵌入。它们共享 AIAgent 的对话引擎（第 6 章）、工具系统（第 9-13 章）、模型适配层（第 14-15 章），但各自根据场景禁用了不适合的能力。
+
+---
+
+## 速查表
+
+| 文件 / 位置 | 角色 |
+|-------------|------|
+| `cron/scheduler.py:53` | `SILENT_MARKER` — 静默投递标记 |
+| `cron/scheduler.py:44` | `_KNOWN_DELIVERY_PLATFORMS` — 合法平台白名单 |
+| `cron/scheduler.py:62` | `_LOCK_FILE` — tick 文件锁路径 |
+| `cron/scheduler.py:199` | `_deliver_result()` — 双路径投递 |
+| `cron/scheduler.py:404` | `_run_job_script()` — 脚本执行（含路径遍历防护）|
+| `cron/scheduler.py:485` | `_build_job_prompt()` — 提示词构建 + 技能加载 |
+| `cron/scheduler.py:575` | `run_job()` — Agent 实例化与不活跃超时 |
+| `cron/scheduler.py:897` | `tick()` — 主调度循环 + 文件锁 |
+| `cron/jobs.py:117` | `parse_schedule()` — 四格式 schedule 解析 |
+| `cron/jobs.py:252` | `_compute_grace_seconds()` — 补执行窗口计算 |
+| `cron/jobs.py:349` | `save_jobs()` — 原子 JSON 写入 |
+| `acp_adapter/entry.py:23` | `_setup_logging()` — stderr 路由 |
+| `acp_adapter/entry.py:58` | `main()` — ACP 入口点 |
+| `acp_adapter/server.py:70` | `_executor` — 4 线程 Agent 池 |
+| `acp_adapter/server.py:93` | `HermesACPAgent` — ACP Agent 实现 |
+| `acp_adapter/server.py:150` | `_register_session_mcp_servers()` — IDE MCP 工具注册 |

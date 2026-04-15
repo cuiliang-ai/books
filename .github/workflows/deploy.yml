@@ -25,15 +25,33 @@ jobs:
         with:
           mdbook-version: 'latest'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Create output directory
         run: mkdir -p output
 
-      - name: Build all books
+      - name: Build mdBook projects
         run: |
           for dir in */; do
             if [ -f "${dir}book.toml" ]; then
-              echo "Building ${dir}..."
+              echo "Building mdBook: ${dir}..."
               mdbook build "${dir}" --dest-dir "$(pwd)/output/${dir%/}"
+            fi
+          done
+
+      - name: Build Astro projects
+        run: |
+          for dir in */; do
+            if [ -f "${dir}astro.config.mjs" ] && [ -f "${dir}package.json" ]; then
+              echo "Building Astro: ${dir}..."
+              cd "${dir}"
+              npm ci
+              npm run build
+              cp -r dist/* "../output/${dir%/}/" 2>/dev/null || mkdir -p "../output/${dir%/}" && cp -r dist/* "../output/${dir%/}/"
+              cd ..
             fi
           done
 

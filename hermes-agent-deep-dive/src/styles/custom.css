@@ -1,0 +1,280 @@
+/* Custom styles for Hermes Agent Deep Dive — Starlight Edition */
+/* Optimized for Chinese content readability */
+
+/* === Font Imports === */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* === Starlight Theme Overrides === */
+:root {
+  --sl-color-accent-low: #fdf0ec;
+  --sl-color-accent: #d97757;
+  --sl-color-accent-high: #8b3a1f;
+  --sl-font-system: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --sl-font-system-mono: 'JetBrains Mono', 'Cascadia Mono', 'Source Code Pro', 'Consolas', monospace;
+  --sl-content-width: 55rem;
+  --sl-text-2xl: 1.6rem;
+  --sl-text-xl: 1.3rem;
+  --sl-text-lg: 1.1rem;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #3d1f0f;
+  --sl-color-accent: #e8956f;
+  --sl-color-accent-high: #fde8dd;
+}
+
+/* === Reading Progress Bar === */
+.reading-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 0%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--sl-color-accent), #f59e0b);
+  z-index: 9999;
+  transition: width 50ms linear;
+}
+
+/* === Chinese Typography === */
+.sl-markdown-content {
+  line-height: 1.85;
+  letter-spacing: 0.01em;
+  font-feature-settings: 'kern' 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.sl-markdown-content p {
+  margin-bottom: 1.2em;
+  text-align: justify;
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+.sl-markdown-content h1 {
+  border-bottom: 2px solid var(--sl-color-gray-5);
+  padding-bottom: 0.4em;
+  font-weight: 700;
+}
+
+.sl-markdown-content h2 {
+  border-bottom: 1px solid var(--sl-color-gray-6);
+  padding-bottom: 0.3em;
+  margin-top: 2.5em;
+  font-weight: 600;
+}
+
+.sl-markdown-content h3 {
+  margin-top: 1.8em;
+  font-weight: 600;
+}
+
+.sl-markdown-content h4 {
+  margin-top: 1.5em;
+  font-weight: 600;
+}
+
+/* Strong text in accent color for emphasis */
+.sl-markdown-content strong {
+  font-weight: 600;
+}
+
+/* === Lists — better spacing for CJK === */
+.sl-markdown-content ul,
+.sl-markdown-content ol {
+  margin-bottom: 1.2em;
+}
+
+.sl-markdown-content li {
+  margin-bottom: 0.3em;
+}
+
+.sl-markdown-content li > p {
+  margin-bottom: 0.5em;
+}
+
+/* === Tables — readable with mixed CJK/Latin === */
+.sl-markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5em 0;
+  font-size: 0.9em;
+}
+
+.sl-markdown-content table th {
+  white-space: nowrap;
+  font-weight: 600;
+  text-align: left;
+  background-color: var(--sl-color-gray-7);
+}
+
+.sl-markdown-content table th,
+.sl-markdown-content table td {
+  padding: 0.6em 0.8em;
+  border: 1px solid var(--sl-color-gray-5);
+}
+
+/* First column — ensure readable left padding */
+.sl-markdown-content table th:first-child,
+.sl-markdown-content table td:first-child {
+  padding-left: 1em;
+}
+
+.sl-markdown-content table tr:nth-child(even) {
+  background-color: var(--sl-color-gray-7, rgba(0,0,0,0.02));
+}
+
+.sl-markdown-content table tr:hover {
+  background-color: var(--sl-color-accent-low);
+}
+
+/* Table code cells — don't wrap function names */
+.sl-markdown-content table code {
+  white-space: nowrap;
+  font-size: 0.85em;
+}
+
+/* === Inline code — lighter styling === */
+.sl-markdown-content :not(pre) > code {
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.88em;
+  font-weight: 500;
+}
+
+/* === Blockquotes — design decisions & notes === */
+.sl-markdown-content blockquote {
+  border-left: 4px solid var(--sl-color-accent);
+  background-color: var(--sl-color-accent-low);
+  padding: 14px 20px;
+  border-radius: 0 6px 6px 0;
+  margin: 1.5em 0;
+}
+
+.sl-markdown-content blockquote p {
+  margin-bottom: 0.5em;
+}
+
+.sl-markdown-content blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+/* === Horizontal Rules — chapter section dividers === */
+.sl-markdown-content hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--sl-color-gray-5), transparent);
+  margin: 2em 0;
+}
+
+/* === Code Blocks — enhanced styling === */
+.sl-markdown-content .expressive-code {
+  margin: 1.5em 0;
+}
+
+/* === Interactive Component Container === */
+.interactive-wrapper {
+  margin: 1.5em 0;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* === Mermaid diagrams (client-side rendered) === */
+.mermaid {
+  text-align: center;
+  margin: 1.5em 0;
+  padding: 1em 0;
+  background: transparent;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* === Sidebar enhancements === */
+nav.sidebar summary {
+  font-weight: 600;
+}
+
+/* === Mobile responsive === */
+@media (max-width: 768px) {
+  :root {
+    --sl-content-width: 100%;
+  }
+
+  .sl-markdown-content {
+    line-height: 1.75;
+    font-size: 0.95rem;
+  }
+
+  .sl-markdown-content h2 {
+    margin-top: 2em;
+  }
+
+  .sl-markdown-content table {
+    font-size: 0.8em;
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sl-markdown-content blockquote {
+    padding: 10px 14px;
+  }
+}
+
+/* === Print styles === */
+@media print {
+  .reading-progress,
+  nav.sidebar,
+  .right-sidebar,
+  header {
+    display: none !important;
+  }
+
+  .sl-markdown-content {
+    max-width: 100%;
+    font-size: 11pt;
+    line-height: 1.6;
+  }
+
+  .sl-markdown-content h2 {
+    page-break-after: avoid;
+  }
+
+  .sl-markdown-content table {
+    page-break-inside: avoid;
+  }
+
+  .sl-markdown-content pre {
+    page-break-inside: avoid;
+  }
+}
+
+/* === Scrollbar styling (WebKit) === */
+:root[data-theme='dark'] ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:root[data-theme='dark'] ::-webkit-scrollbar-track {
+  background: #1a1a2e;
+}
+
+:root[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: #3a3a5e;
+  border-radius: 4px;
+}
+
+:root[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: #4a4a6e;
+}
+
+/* === Selection color === */
+::selection {
+  background-color: var(--sl-color-accent-low);
+  color: var(--sl-color-accent-high);
+}

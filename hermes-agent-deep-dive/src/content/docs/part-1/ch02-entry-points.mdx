@@ -1,0 +1,371 @@
+---
+title: "第 2 章：运行形态与入口点"
+description: "六种运行模态如何共享同一个 AIAgent 核心"
+sidebar:
+  order: 2
+---
+
+import SixEntryPoints from '../../../components/diagrams/SixEntryPoints.tsx';
+
+<SixEntryPoints client:only="react" />
+
+## 六扇门，一颗心
+
+每个软件系统都有一个重心。在数据库里，它是存储引擎。在编译器里，它是中间表示。在 Hermes Agent 里，它是 `run_agent.py` 中的 `AIAgent` 类——一个 10,594 行的文件，包含驱动一切的核心循环。
+
+但用户并不直接接触 `AIAgent`。他们通过六扇不同的门走进来，每扇门适合不同的场景。一个在终端里打字的开发者、一个在 Telegram 上发消息的用户、一个 VS Code 编辑器的后台进程、一个并行生成训练数据的脚本、一个暴露 MCP 工具的服务、一个 RL 训练管道——这六种截然不同的使用场景，最终都实例化同一个 `AIAgent`，调用同一个 `run_conversation()` 方法。
+
+这不是偶然。这是一个刻意的架构决策：**把所有智能集中在一个类里，让入口点只负责适配外部接口**。
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       用户 / 外部系统                              │
+├────────────┬────────────┬──────────┬──────────┬────────┬────────┤
+│  hermes    │ hermes     │hermes-acp│  python  │ python │ python │
+│  (CLI)     │ gateway    │ (IDE)    │ batch_   │ mcp_   │ rl_    │
+│            │ start      │          │ runner.py│serve.py│cli.py  │
+├────────────┼────────────┼──────────┼──────────┼────────┼────────┤
+│hermes_cli/ │ gateway/   │acp_      │          │        │        │
+│main.py     │ run.py     │adapter/  │          │        │        │
+│  ↓         │  ↓         │entry.py  │          │        │        │
+│HermesCLI   │GatewayRunner│  ↓      │          │        │        │
+│  ↓         │  ↓         │ ↓       │  ↓       │  ↓     │  ↓     │
+├────────────┴────────────┴──────────┴──────────┴────────┴────────┤
+│                      run_agent.py                                │
+│                     class AIAgent                                │
+│                  run_conversation()                               │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+接下来逐一拆解每扇门。
+
+---
+
+## 入口一：交互式 CLI
+
+**命令**：`hermes`
+**源文件**：`hermes_cli/main.py` → `cli.py`
+**注册**：`pyproject.toml:115` — `hermes = "hermes_cli.main:main"`
+
+这是用户最常接触的入口。当你在终端键入 `hermes` 并按下回车，以下事情按序发生：
+
+### 启动序列
+
+```python
+# pyproject.toml 第 115 行定义了入口点
+# hermes = "hermes_cli.main:main"
+
+# 1. Profile 覆盖 (hermes_cli/main.py:83)
+_apply_profile_override()
+# 在任何模块导入之前拦截 --profile/-p 参数
+# 设置 HERMES_HOME 环境变量，因为很多模块在 import 时就缓存了这个路径
+
+# 2. 环境变量加载 (hermes_cli/main.py:140-144)
+load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
+# 先加载 ~/.hermes/.env，再加载项目根目录的 .env 作为开发回退
+
+# 3. 日志初始化 (hermes_cli/main.py:148-152)
+setup_logging(mode="cli")
+# agent.log + errors.log 写入 ~/.hermes/logs/
+
+# 4. IPv4 偏好 (hermes_cli/main.py:155-163)
+# 如果 config.network.force_ipv4 为 true，在任何 HTTP 客户端创建前应用
+
+# 5. main() — 参数解析与子命令分发 (hermes_cli/main.py:4476)
+```
+
+Profile 覆盖的位置值得注意——它在 `main()` 函数之前，在模块级执行。注释解释了原因："Many modules cache HERMES_HOME at import time (module-level constants)." 如果 Profile 覆盖发生得太晚，模块已经缓存了默认路径，切换 Profile 就无效了。这是一个典型的"初始化顺序敏感"问题。
+
+### 子命令分发
+
+`main()` 函数是一个 6,000 行文件里的巨型 argparse 调度器。核心路径只有两条：
+
+1. **无子命令** → 交互式聊天 → `HermesCLI` → `AIAgent`
+2. **有子命令** → `setup` / `gateway` / `model` / `config` / `sessions` / `cron` / `doctor` / `logs` / ...
+
+交互式聊天的路径最终到达 `cli.py` 中的 `HermesCLI` 类（9,956 行）。这个类负责：
+
+- Rich 终端渲染（彩色输出、Markdown、表格）
+- prompt_toolkit 交互式输入（多行编辑、历史、自动补全）
+- Slash 命令注册与分发（`/model`、`/compress`、`/skills`、`/new` 等）
+- 会话管理（新建、恢复、重命名）
+- 工具审批 UI（危险命令确认对话框）
+- `AIAgent` 的实例化与生命周期管理
+
+`HermesCLI` 是 `AIAgent` 最复杂的消费者——它不仅调用 `run_conversation()`，还通过回调接收流式 token、工具调用预览、审批请求。它是**最肥的适配器层**，因为终端交互的复杂度远超"收消息→回消息"的简单模型。
+
+### TTY 守卫
+
+一个细节值得注意。`hermes_cli/main.py:53` 定义了 `_require_tty()` 函数：
+
+```python
+def _require_tty(command_name: str) -> None:
+    """Exit with a clear error if stdin is not a terminal."""
+    if not sys.stdin.isatty():
+        print(
+            f"Error: 'hermes {command_name}' requires an interactive terminal.\n"
+            f"It cannot be run through a pipe or non-interactive subprocess.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+```
+
+交互式子命令（`tools`、`setup`、`model`）会调用这个守卫。原因在注释里："curses or input() prompts that spin at 100% CPU when stdin is a pipe." 当有人通过管道或 subprocess 调用这些命令时（比如另一个 Agent 通过终端工具调用 `hermes setup`），没有 TTY 的 input() 会进入无限循环。这个守卫把一个隐蔽的 CPU 烧毁变成了一个清晰的错误信息。
+
+---
+
+## 入口二：消息网关
+
+**命令**：`hermes gateway start`
+**源文件**：`gateway/run.py`
+**规模**：8,982 行
+
+Gateway 是 Hermes 最独特的入口——它把一个终端 Agent 变成了一个**多平台消息服务**。
+
+### 工作原理
+
+`GatewayRunner` 是一个异步事件循环驱动的服务器。启动时，它：
+
+1. 读取配置，确定哪些平台已启用
+2. 为每个启用的平台实例化一个适配器（继承自 `BasePlatformAdapter`）
+3. 启动所有适配器的事件监听
+4. 当消息到达时：适配器 → 会话查找/创建 → `AIAgent` 实例 → `run_conversation()` → 响应 → 适配器 → 平台
+
+15 个平台适配器位于 `gateway/platforms/` 目录：
+
+| 文件 | 平台 |
+|------|------|
+| `telegram.py` | Telegram Bot API（轮询 + Webhook 双模式） |
+| `discord.py` | Discord.py，支持分片和语音频道 |
+| `slack.py` | Slack Bolt SDK，支持多工作区 OAuth |
+| `whatsapp.py` | WhatsApp Business API |
+| `signal.py` | Signal 消息协议 |
+| `email.py` | IMAP/SMTP 邮件收发 |
+| `matrix.py` | Matrix 联邦协议（含端到端加密） |
+| `dingtalk.py` | 钉钉开放平台 |
+| `feishu.py` | 飞书/Lark 开放平台 |
+| `wecom.py` | 企业微信 |
+| `weixin.py` | 微信公众号 |
+| `bluebubbles.py` | BlueBubbles (iMessage 桥接) |
+| `sms.py` | Twilio SMS |
+| `mattermost.py` | Mattermost 开源协作 |
+| `webhook.py` | 通用 Webhook |
+
+另外还有 `api_server.py`（OpenAI 兼容的 API 服务器）和 `homeassistant.py`（Home Assistant 集成），以及若干辅助文件（`base.py`、`helpers.py`、`telegram_network.py`、`wecom_callback.py`、`wecom_crypto.py`）。
+
+### Gateway 与 CLI 的关键差异
+
+Gateway 模式下的 `AIAgent` 与 CLI 模式下的 `AIAgent` 是**同一个类**——构造参数不同，但核心循环相同。主要差异在适配层：
+
+- **会话管理**：CLI 是单用户单会话；Gateway 是多用户并发会话，每个平台×用户对应一个独立的 `AIAgent` 实例
+- **流式输出**：CLI 逐 token 渲染到终端；Gateway 需要按平台限制分段发送（Telegram 消息最大 4,096 字符，Discord 最大 2,000 字符）
+- **工具审批**：CLI 弹出终端对话框；Gateway 在消息平台上发送审批按钮（Slack 和 Telegram 支持原生按钮，其他平台通过文本命令 `/approve`）
+- **文件处理**：CLI 直接读写本地文件系统；Gateway 需要处理平台特定的文件上传/下载 API
+- **语音**：Gateway 需要跨平台语音转录（Telegram 语音消息 → Whisper → 文本）
+
+### 配置桥接
+
+Gateway 有自己的配置格式（在 config.yaml 的 `gateway` 段），需要**桥接**到 `AIAgent` 的构造参数。`gateway/run.py` 中有大量代码负责这个映射——确定 SSL 证书路径、解析平台凭据、设置每个平台的 Toolset、配置 cron 调度器。这是为什么 `gateway/run.py` 有 8,982 行的主要原因：它不仅是一个消息路由器，还是一个完整的配置编排器。
+
+---
+
+## 入口三：ACP 服务器
+
+**命令**：`hermes-acp` 或 `hermes acp`
+**源文件**：`acp_adapter/entry.py`
+**注册**：`pyproject.toml:117` — `hermes-acp = "acp_adapter.entry:main"`
+
+ACP（Agent Communication Protocol）是 IDE 集成的标准协议。当 VS Code、Zed 或 JetBrains 启动 Hermes 扩展时，它们不是直接调用 Python——它们启动 `hermes-acp` 进程，通过 stdio 进行 JSON-RPC 通信。
+
+入口函数的第一个设计决策就暴露了 ACP 的核心约束：
+
+```python
+def _setup_logging() -> None:
+    """Route all logging to stderr so stdout stays clean for ACP stdio."""
+    handler = logging.StreamHandler(sys.stderr)
+    ...
+```
+
+stdout 被保留给 ACP 协议的 JSON-RPC 消息。所有日志必须走 stderr。这个决策贯穿整个 ACP 适配器——任何不小心 `print()` 到 stdout 的代码都会破坏协议通信。
+
+ACP 适配器的工作模式与 Gateway 类似但更简单：它只服务一个客户端（IDE），不需要多平台适配，不需要会话隔离。它本质上是一个**单用户 Gateway**，用 JSON-RPC 替代了消息平台 API。
+
+---
+
+## 入口四：批量运行
+
+**命令**：`python batch_runner.py --dataset_file=data.jsonl --batch_size=10`
+**源文件**：`batch_runner.py`
+**用途**：并行轨迹生成（RL 训练数据）
+
+这是 Hermes "研究就绪"设计理念的具体体现。`batch_runner.py` 的开头说明了一切：
+
+```python
+"""
+Batch Agent Runner
+
+This module provides parallel batch processing capabilities for running the agent
+across multiple prompts from a dataset. It includes:
+- Dataset loading and batching
+- Parallel batch processing with multiprocessing
+- Checkpointing for fault tolerance and resumption
+- Trajectory saving in the proper format (from/value pairs)
+- Tool usage statistics aggregation across all batches
+"""
+```
+
+与前三个入口的核心区别：`batch_runner.py` 不是交互式的，它使用 `multiprocessing.Pool` 并行运行多个 `AIAgent` 实例，每个处理数据集中的一个 prompt。运行过程中会保存检查点，支持中断后恢复。
+
+`batch_runner.py` 直接 import `AIAgent`：
+
+```python
+from run_agent import AIAgent
+```
+
+没有 `HermesCLI`，没有 `GatewayRunner`——直接实例化 Agent，调用 `run_conversation()`，收集轨迹数据。这是六种入口中**最薄的适配层**。
+
+一个有趣的细节：`batch_runner.py` 使用 `toolset_distributions.py` 来随机采样不同的 Toolset 组合。这意味着训练数据可以覆盖不同的工具配置场景——Agent 有时候有浏览器工具，有时候没有；有时候有文件工具，有时候被限制只能用终端。这种随机化对训练泛化能力的模型至关重要。
+
+---
+
+## 入口五：MCP 服务端
+
+**命令**：`hermes mcp serve`
+**源文件**：`mcp_serve.py`
+**用途**：将 Hermes 会话暴露为 MCP 工具
+
+注意方向的反转：`tools/mcp_tool.py` 是 Hermes 作为 MCP **客户端**连接外部 MCP 服务器；`mcp_serve.py` 是 Hermes 作为 MCP **服务端**被外部客户端连接。
+
+这个入口让任何 MCP 兼容客户端（Claude Desktop、Cursor、Codex CLI 等）都能：
+
+- 列出 Hermes 的历史会话
+- 读取会话中的消息
+- 向 Hermes 发送消息
+- 轮询实时事件
+- 管理审批请求
+
+`mcp_serve.py` 的 docstring 列出了 10 个 MCP 工具：
+
+```
+conversations_list, conversation_get, messages_read, attachments_fetch,
+events_poll, events_wait, messages_send, permissions_list_open,
+permissions_respond, channels_list
+```
+
+它使用 `FastMCP` 库（来自 MCP SDK）创建 stdio 服务端。配置方式符合 MCP 标准：
+
+```json
+{
+    "mcpServers": {
+        "hermes": {
+            "command": "hermes",
+            "args": ["mcp", "serve"]
+        }
+    }
+}
+```
+
+这是一个精巧的**角色反转**。通过同一套 MCP 协议，Hermes 既能*使用*外部工具（作为客户端），也能*被使用*（作为服务端）。它把自己从一个孤立的 Agent 变成了更大 Agent 生态系统中的**可组合节点**。
+
+---
+
+## 入口六：RL 训练环境
+
+**命令**：`python rl_cli.py "Train a model on GSM8k"`
+**源文件**：`rl_cli.py`
+**用途**：强化学习训练工作流
+
+RL CLI 是六种入口中最专业化的。它的 docstring 直接列出了依赖：
+
+```python
+"""
+Environment Variables:
+    TINKER_API_KEY: API key for Tinker service (required)
+    WANDB_API_KEY: API key for WandB metrics (required)
+    OPENROUTER_API_KEY: API key for agent (required)
+"""
+```
+
+三个必须的 API Key——Tinker（Nous Research 的 RL 训练平台）、WandB（实验追踪）、OpenRouter（Agent 推理）。这不是面向终端用户的入口，而是面向 ML 研究人员的。
+
+RL CLI 的特殊之处：
+
+```python
+# Set terminal working directory to tinker-atropos submodule
+tinker_atropos_dir = Path(__file__).parent / 'tinker-atropos'
+if tinker_atropos_dir.exists():
+    os.environ['TERMINAL_CWD'] = str(tinker_atropos_dir)
+    os.environ['HERMES_QUIET'] = '1'
+```
+
+它把终端工具的工作目录强制设为 `tinker-atropos` 子模块，并设置 `HERMES_QUIET=1` 禁止创建临时子目录。这意味着 Agent 的终端操作自动发生在 RL 训练环境的上下文中——它可以直接修改训练配置、启动训练任务、检查训练日志。
+
+`rl_cli.py` 加载了全部工具集**包括 `rl_training_tool.py`**——这个工具注册了 10 个 RL 专用工具（`registry.register()` 在该文件中出现 10 次）。这些工具在其他入口中是不可用的，因为它们不包含在标准 Toolset 里。
+
+---
+
+## 共享核心：参数差异矩阵
+
+六种入口最终都实例化 `AIAgent`，但传入不同的参数。理解这些差异就是理解每种运行模态的本质。
+
+| 参数维度 | CLI | Gateway | ACP | Batch | MCP Server | RL CLI |
+|---------|-----|---------|-----|-------|------------|--------|
+| 会话数 | 1 | N（每用户/平台） | 1 | N（并行） | 不直接创建 | 1 |
+| Toolset | 用户配置 | 平台配置 | IDE 限定 | 随机采样 | — | RL 扩展集 |
+| 流式输出 | Rich 终端 | 平台适配 | JSON-RPC | 无 | — | 无 |
+| 工具审批 | 终端对话框 | 平台按钮 | IDE UI | 自动 | — | 自动 |
+| 记忆 | MEMORY.md | per-user MEMORY | IDE 项目 | 无 | — | 无 |
+| 迭代预算 | 默认 | 平台配置 | 默认 | 配置 | — | 扩展 |
+| 并发模型 | 单线程 | asyncio | asyncio | multiprocessing | asyncio | 单线程 |
+
+核心观察：**`AIAgent` 不关心它在哪里运行**。它接收消息列表、工具集、配置——然后运行循环。循环的行为完全由构造参数决定，不由入口决定。这就是为什么同一个 `run_conversation()` 可以在终端、Telegram、VS Code、训练管道中运行，而不需要任何条件分支。
+
+这个设计有一个名字：**Hexagonal Architecture**（六边形架构）。核心业务逻辑（`AIAgent`）与外部接口（CLI、Gateway、ACP 等）通过端口和适配器解耦。每种入口就是一个适配器，`AIAgent` 是内核。Hermes 可能没有刻意追随这个架构模式，但结果是一样的。
+
+---
+
+## 第三个入口点：pyproject.toml 的秘密
+
+`pyproject.toml` 定义了三个可执行入口：
+
+```toml
+[project.scripts]
+hermes = "hermes_cli.main:main"
+hermes-agent = "run_agent:main"
+hermes-acp = "acp_adapter.entry:main"
+```
+
+第二个入口 `hermes-agent` 直接指向 `run_agent:main`——跳过了 CLI 适配层，直接调用 `AIAgent`。这是最底层的入口，可能用于调试或直接嵌入其他 Python 程序。它的存在说明了一个设计哲学：**核心引擎必须可以独立于所有 UI 层运行**。
+
+---
+
+## 为什么是六种而不是一种
+
+一个自然的问题：为什么需要六种入口？为什么不能像大多数 AI 工具一样，只提供一个 CLI？
+
+答案回到第 1 章的设计哲学：Hermes 不是一个编程工具，它是一个**通用 Agent 运行时**。
+
+- 你是开发者？用 CLI
+- 你在手机上？用 Telegram Gateway
+- 你在 IDE 里？用 ACP
+- 你在训练模型？用 batch_runner
+- 你在构建 Agent 系统？用 MCP Server
+- 你在做 RL 研究？用 rl_cli
+
+六种入口不是过度设计——它们是"runs anywhere"承诺的具体实现。而让这一切成为可能的，是 `AIAgent` 的入口无关性。
+
+下一章将缩小焦距，用一张完整的架构图建立你对 Hermes Agent 的心智模型——从用户输入到最终响应的完整数据流。
+
+---
+
+## 速查表
+
+| 入口 | 命令 | 源文件 | 规模 | 适配层 |
+|------|------|--------|------|--------|
+| CLI | `hermes` | `hermes_cli/main.py` → `cli.py` | 6,057 + 9,956 行 | HermesCLI（最厚） |
+| Gateway | `hermes gateway start` | `gateway/run.py` | 8,982 行 | GatewayRunner + 15 平台适配器 |
+| ACP | `hermes-acp` | `acp_adapter/entry.py` | — | 单用户 JSON-RPC |
+| Batch | `python batch_runner.py` | `batch_runner.py` | — | 最薄——直接 import AIAgent |
+| MCP Server | `hermes mcp serve` | `mcp_serve.py` | — | FastMCP stdio 服务端 |
+| RL | `python rl_cli.py` | `rl_cli.py` | — | RL 扩展 Toolset |
+| 直接 | `hermes-agent` | `run_agent.py` | 10,594 行 | 无适配层 |

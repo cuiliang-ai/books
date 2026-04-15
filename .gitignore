@@ -2,6 +2,11 @@
 **/book/
 output/
 
+# Astro / Node.js
+**/node_modules/
+**/dist/
+**/.astro/
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -12,3 +17,6 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+
+# Claude Code
+.claude/

@@ -1,0 +1,204 @@
+---
+title: Hermes Agent 源码深度解析
+description: Nous Research 自进化 AI Agent 源码深度解析
+template: splash
+hero:
+  tagline: Nous Research 自进化 AI Agent 源码深度解析 — 基于 Python 源码全面剖析 Agentic Loop、工具生态、学习闭环、多平台网关
+  actions:
+    - text: 开始阅读
+      link: /hermes-agent-deep-dive/part-1/ch01-product-vision/
+      icon: right-arrow
+    - text: 全景概览
+      link: /hermes-agent-deep-dive/part-1/ch03-mental-model/
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="30 章深度解析" icon="open-book">
+    从产品特性到 RL 训练，逐层拆解 227K 行 Python 源码。每章附源码锚点，可边读边对照。
+  </Card>
+  <Card title="30+ 交互组件" icon="puzzle">
+    每章配备可交互的架构图、流程动画、对比卡片，帮助理解复杂的 Agent 架构。
+  </Card>
+  <Card title="自进化闭环" icon="rocket">
+    业界少见的"从经验学习"架构 — Skills 自动创建、使用中改进、持久记忆、跨会话召回。
+  </Card>
+  <Card title="开源 MIT" icon="github">
+    Hermes Agent 完全开源，本书基于 v0.8.0 版本源码分析。可自由阅读、修改、商用。
+  </Card>
+</CardGrid>
+
+---
+
+## 核心数据
+
+| 指标 | 值 |
+|------|-----|
+| **版本** | v0.8.0 (2026-04-08) |
+| **语言** | Python 3.11+ |
+| **代码量** | ~227K 行 Python |
+| **核心文件** | `run_agent.py` (10.6K 行), `cli.py` (10K 行), `gateway/run.py` (9K 行) |
+| **工具数** | 40+ 内置工具，6 种终端后端 |
+| **Skills** | 27 类内置 + 50+ 可选 |
+| **平台** | CLI + 15 个消息平台 |
+| **源码** | [github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
+
+---
+
+## 本书结构
+
+全书分为 **7 部分 30 章 + 2 附录**，从鸟瞰概览到引擎内核、工具生态、学习闭环、多平台网关，最终到扩展与展望：
+
+### 第一部分 · 鸟瞰 Hermes Agent
+
+| 章节 | 主题 | 核心问题 |
+|------|------|----------|
+| [第 1 章](/hermes-agent-deep-dive/part-1/ch01-product-vision/) | 产品特性与设计目标 | 自进化 Agent 与传统 AI 工具的本质区别？ |
+| [第 2 章](/hermes-agent-deep-dive/part-1/ch02-entry-points/) | 运行形态与入口点 | 六种运行模态如何共享同一个 AIAgent 核心？ |
+| [第 3 章](/hermes-agent-deep-dive/part-1/ch03-mental-model/) | 十分钟心智模型 | 一张总图建立全局认知？ |
+
+### 第二部分 · 智能体引擎
+
+| 章节 | 主题 | 核心问题 |
+|------|------|----------|
+| [第 4 章](/hermes-agent-deep-dive/part-2/ch04-aiagent-class/) | AIAgent 类全貌 | 构造参数、状态字段、生命周期？ |
+| [第 5 章](/hermes-agent-deep-dive/part-2/ch05-main-loop/) | 主循环解剖 | `run_conversation()` 的完整时序？ |
+| [第 6 章](/hermes-agent-deep-dive/part-2/ch06-system-prompt/) | System Prompt装配 | 七层 Prompt 如何组装？注入检测？ |
+| [第 7 章](/hermes-agent-deep-dive/part-2/ch07-context-compression/) | 上下文压缩 | ContextEngine 的可插拔设计？ |
+| [第 8 章](/hermes-agent-deep-dive/part-2/ch08-message-model/) | 消息模型与 API 适配 | 多模型如何统一抽象？ |
+| [第 9 章](/hermes-agent-deep-dive/part-2/ch09-error-routing/) | 错误分类与路由降级 | 自动 failover 如何工作？ |
+
+### 第三部分 · 工具生态
+
+| 章节 | 主题 | 核心问题 |
+|------|------|----------|
+| [第 10 章](/hermes-agent-deep-dive/part-3/ch10-tool-registry/) | Tool Registry | 工具如何自注册、发现、调度？ |
+| [第 11 章](/hermes-agent-deep-dive/part-3/ch11-toolset-algebra/) | Toolset 代数 | 40+ 工具如何分组与组合？ |
+| [第 12 章](/hermes-agent-deep-dive/part-3/ch12-terminal-backends/) | 六种 Terminal 后端 | 统一抽象如何适配 6 种执行环境？ |
+| [第 13 章](/hermes-agent-deep-dive/part-3/ch13-file-web-tools/) | 文件与 Web 工具族 | fuzzy patch 与多后端 Web 搜索？ |
+| [第 14 章](/hermes-agent-deep-dive/part-3/ch14-browser-mcp/) | Browser 与 MCP | 无视觉浏览器操控与开放工具扩展？ |
+| [第 15 章](/hermes-agent-deep-dive/part-3/ch15-code-exec-delegation/) | 代码执行与子 Agent | PTC 的 UDS RPC 与委派隔离模型？ |
+
+### 第四部分 · 学习闭环
+
+| 章节 | 主题 | 核心问题 |
+|------|------|----------|
+| [第 16 章](/hermes-agent-deep-dive/part-4/ch16-session-db/) | 会话存储 SessionDB | SQLite + FTS5 的持久化设计？ |
+| [第 17 章](/hermes-agent-deep-dive/part-4/ch17-memory-system/) | Memory 系统 | MEMORY.md/USER.md 的冻结快照模式？ |
+| [第 18 章](/hermes-agent-deep-dive/part-4/ch18-skills-system/) | Skills 系统 | 渐进式披露与 Skills Hub？ |
+| [第 19 章](/hermes-agent-deep-dive/part-4/ch19-session-search/) | Session Search | FTS5 + LLM 摘要的跨会话回忆？ |
+| [第 20 章](/hermes-agent-deep-dive/part-4/ch20-learning-loop/) | 封闭学习循环 | 自我进化闭环的完整数据流？ |
+
+### 第五部分 · 多平台网关
+
+| 章节 | 主题 | 核心问题 |
+|------|------|----------|
+| [第 21 章](/hermes-agent-deep-dive/part-5/ch21-gateway-architecture/) | Gateway 架构 | 一个 Agent 如何服务 15 个平台？ |
+| [第 22 章](/hermes-agent-deep-dive/part-5/ch22-platform-adapters/) | Platform Adapter 模式 | 适配器的抽象与差异化实现？ |
+| [第 23 章](/hermes-agent-deep-dive/part-5/ch23-cron-acp/) | Cron 调度与 ACP | 定时任务投递与 IDE 集成？ |
+
+### 第六部分 · 横切关注点
+
+| 章节 | 主题 | 核心问题 |
+|------|------|----------|
+| [第 24 章](/hermes-agent-deep-dive/part-6/ch24-cli-skin/) | CLI 与 Skin Engine | Rich + prompt_toolkit 的交互设计？ |
+| [第 25 章](/hermes-agent-deep-dive/part-6/ch25-config-credentials/) | 配置、凭据与 Profiles | 分层配置与多密钥轮换？ |
+| [第 26 章](/hermes-agent-deep-dive/part-6/ch26-security/) | 安全纵深 | 命令审批、路径安全、注入防御？ |
+| [第 27 章](/hermes-agent-deep-dive/part-6/ch27-threading-model/) | 线程模型 | 同步↔异步桥接的设计权衡？ |
+
+### 第七部分 · 扩展与展望
+
+| 章节 | 主题 |
+|------|------|
+| [第 28 章](/hermes-agent-deep-dive/part-7/ch28-extension-guide/) | 扩展实战 — 新增工具、平台与后端 |
+| [第 29 章](/hermes-agent-deep-dive/part-7/ch29-rl-trajectory/) | RL 训练与 Trajectory 生成 |
+| [第 30 章](/hermes-agent-deep-dive/part-7/ch30-design-philosophy/) | 设计哲学与同类对比 |
+
+### 附录
+
+| 附录 | 主题 |
+|------|------|
+| [附录 A](/hermes-agent-deep-dive/appendix/appendix-a-source-index/) | 源码锚点索引与 Slash 命令速查 |
+| [附录 B](/hermes-agent-deep-dive/appendix/appendix-b-config-reference/) | 配置 YAML Schema 与环境变量参考 |
+
+---
+
+## 源码目录速览
+
+本书分析的源码位于 `hermes-agent/` 仓库根目录，以下是核心模块结构：
+
+```
+hermes-agent/
+├── run_agent.py          # AIAgent 类 — 核心会话循环 (10.6K 行)
+├── model_tools.py        # 工具编排层 — 发现 + 分发
+├── toolsets.py            # 工具集定义 — 40+ 工具的分组与组合
+├── cli.py                 # HermesCLI 类 — 交互式 CLI 编排器 (10K 行)
+├── hermes_state.py        # SessionDB — SQLite + FTS5 状态存储
+├── agent/                 # Agent 内部模块
+│   ├── prompt_builder.py      # System Prompt 组装 (含注入检测)
+│   ├── context_compressor.py  # 上下文压缩引擎
+│   ├── context_engine.py      # ContextEngine 抽象基类
+│   ├── memory_manager.py      # 记忆管理器 (builtin + 外部插件)
+│   ├── credential_pool.py     # 多凭据池 + 自动 failover
+│   ├── anthropic_adapter.py   # Anthropic Messages API 适配器
+│   ├── smart_model_routing.py # cheap/strong 模型路由
+│   └── ...
+├── tools/                 # 工具实现 (每工具一文件)
+│   ├── registry.py            # 中央工具注册表
+│   ├── terminal_tool.py       # 终端编排 (6 种后端)
+│   ├── environments/          # 终端后端 (local/docker/ssh/modal/daytona/singularity)
+│   ├── browser_tool.py        # 浏览器自动化
+│   ├── mcp_tool.py            # MCP 客户端
+│   ├── skills_tool.py         # Skills 系统
+│   ├── delegate_tool.py       # 子 Agent 委派
+│   └── ...
+├── gateway/               # 消息平台网关
+│   ├── run.py                 # GatewayRunner (9K 行)
+│   ├── platforms/             # 15 个平台适配器
+│   └── ...
+├── hermes_cli/            # CLI 子命令系统
+├── cron/                  # 定时任务调度器
+├── plugins/               # 可插拔插件
+├── skills/                # 内置 Skills
+└── acp_adapter/           # ACP 服务器 (IDE 集成)
+```
+
+---
+
+## 阅读约定
+
+本书基于 **Python 源码**分析，使用真实的文件名、函数名、类名。标注格式如下：
+
+> `AIAgent.run_conversation()` in `run_agent.py:7544` — 核心会话循环
+
+- **前者**是源码中的**真实函数名**
+- **后者**是**文件路径:行号**（基于 v0.8.0 版本）
+
+每章末尾的**速查表**汇总了该章涉及的所有关键文件和函数。
+
+## 阅读建议
+
+- **快速了解**：先读第 3 章（十分钟心智模型），建立全局地图
+- **深入核心**：接着读第 5 章（主循环解剖），理解 Agent 的心跳
+- **按部分阅读**：每部分相对独立，可根据兴趣选择
+- **源码对照**：每章都附有源码锚点，建议 clone 仓库后边读边对照
+
+## 关于
+
+- **作者**：[Liang Cui](https://cuiliang.ai/about/)
+- **分析对象**：Hermes Agent v0.8.0 (Python 源码)
+- **源码仓库**：[github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+- **状态**：持续更新中
+
+---
+
+## 声明
+
+> **本书仅供学习和研究目的使用。**
+
+- **开源许可**：Hermes Agent 采用 MIT 许可证，由 [Nous Research](https://nousresearch.com/) 构建。本书引用的代码片段遵循 MIT 许可的合理使用。
+- **非官方**：本书为独立的第三方研究作品，未经 Nous Research 授权、赞助或认可。
+- **商标**：Hermes Agent、Nous Research 均为 Nous Research 的商标，本书中的使用仅为描述性引用。
+- **免责**：本书内容仅供参考，不构成任何形式的技术建议或保证。

@@ -1,0 +1,413 @@
+---
+title: "第 15 章：代码执行与子 Agent 委派"
+description: "PTC 的 UDS RPC 与委派隔离模型"
+sidebar:
+  order: 15
+---
+
+import CodeExecDelegation from '../../../components/flows/CodeExecDelegation.tsx';
+
+<CodeExecDelegation client:only="react" />
+
+## 工具的元层
+
+前面的章节介绍了 50+ 个工具——terminal、file、web、browser、MCP。但有两个工具特殊到需要单独一章来讨论：
+
+**execute_code**（代码执行工具）让 LLM 编写 Python 脚本来**调用其他工具**。这是一种元操作——工具调用工具，将多步工具链压缩为一次推理轮次。
+
+**delegate_task**（委派工具）让 Agent 创建**新的 Agent 实例**来处理子任务。这也是一种元操作——Agent 调用 Agent，将复杂任务分解为并发的独立子任务。
+
+两者都涉及深层的架构问题：隔离模型、资源限制、安全边界、递归深度控制。
+
+---
+
+## 15.1 PTC：程序化工具调用
+
+PTC（Programmatic Tool Calling）的设计动机很简单：某些任务需要连续调用 10-20 个工具，每次工具调用都是一次 LLM 推理。如果 LLM 能直接写一个 Python 脚本来批量调用工具，就能将 20 次推理压缩为 1 次。
+
+`tools/code_execution_tool.py`（600+ 行）实现了这个机制。
+
+**SANDBOX_ALLOWED_TOOLS**
+
+并非所有工具都可以在 sandbox 中调用。只有 7 个被允许：
+
+```python
+# tools/code_execution_tool.py:56-64
+SANDBOX_ALLOWED_TOOLS = frozenset([
+    "web_search",
+    "web_extract",
+    "read_file",
+    "write_file",
+    "search_files",
+    "patch",
+    "terminal",
+])
+```
+
+为什么只有这 7 个？安全和复杂性考虑：
+
+- `delegate_task` 不在列表中——sandbox 脚本不应该 spawn 子 Agent（资源失控）
+- `memory`、`todo` 不在列表中——它们需要 Agent 级别状态，sandbox 没有
+- `browser_*` 不在列表中——浏览器会话管理太复杂
+- `clarify` 不在列表中——sandbox 不能和用户交互
+- `execute_code` 自身不在列表中——防止递归
+
+实际可用的 sandbox 工具是 `SANDBOX_ALLOWED_TOOLS` 和当前 session 已启用工具的**交集**。如果 web 工具因为缺少 API key 而不可用，sandbox 中也不会生成 `web_search` 的 stub（第 11 章介绍了这种动态 schema 重写机制）。
+
+---
+
+## 15.2 hermes_tools.py 代码生成器
+
+每次 `execute_code` 被调用时，系统会动态生成一个 `hermes_tools.py` Python 模块，包含每个允许工具的 stub 函数：
+
+```python
+# tools/code_execution_tool.py:84-127
+_TOOL_STUBS = {
+    "web_search": (
+        "web_search",
+        "query: str, limit: int = 5",
+        '"""Search the web. Returns dict with data.web list of ..."""',
+        '{"query": query, "limit": limit}',
+    ),
+    "read_file": (
+        "read_file",
+        "path: str, offset: int = 1, limit: int = 500",
+        '"""Read a file (1-indexed lines). Returns dict with ..."""',
+        '{"path": path, "offset": offset, "limit": limit}',
+    ),
+    # ... 每个工具一个 stub
+}
+```
+
+每个 stub 定义了函数名、参数签名、docstring 和参数打包表达式。`generate_hermes_tools_module()` 将匹配的 stub 拼接成完整的 Python 模块。
+
+生成的模块还包含三个便利辅助函数：
+
+- `json_parse(text)` — 容错的 `json.loads(text, strict=False)`，处理 terminal 输出中的控制字符
+- `shell_quote(s)` — `shlex.quote(s)` 的别名，安全地将变量插入 shell 命令
+- `retry(fn, max_attempts=3, delay=2)` — 指数退避重试，处理网络错误和 API 限流
+
+LLM 编写的脚本使用 `from hermes_tools import web_search, read_file, terminal` 来调用工具。这些函数内部通过 RPC 将调用转发回 Agent 进程中的 `handle_function_call()`。
+
+---
+
+## 15.3 两种 RPC 传输
+
+工具调用在 sandbox 脚本和 Agent 进程之间传递，需要一种进程间通信机制。`execute_code` 提供了两种传输：
+
+**UDS（Unix Domain Socket）传输 — 本地后端**
+
+```python
+# tools/code_execution_tool.py:207-244
+# UDS transport header (embedded in hermes_tools.py)
+_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+_sock.connect(os.environ["HERMES_RPC_SOCKET"])
+
+def _call(tool_name, args):
+    request = json.dumps({"tool": tool_name, "args": args}) + "\n"
+    conn.sendall(request.encode())
+    buf = b""
+    while True:
+        chunk = conn.recv(65536)
+        buf += chunk
+        if buf.endswith(b"\n"):
+            break
+    return json.loads(buf.decode().strip())
+```
+
+Agent 进程启动一个 UDS 监听线程（`_rpc_server_loop`），sandbox 脚本通过 `HERMES_RPC_SOCKET` 环境变量找到 socket 路径。协议是简单的换行分隔 JSON——请求一行、响应一行。
+
+**File-based RPC 传输 — 远程后端**
+
+当 terminal 后端是 Docker/SSH/Modal/Daytona 等远程环境时，UDS 不可用（Agent 进程和脚本不在同一台机器上）。File-based RPC 使用文件系统作为通信通道：
+
+```python
+# tools/code_execution_tool.py:248-295
+# File transport header (embedded in hermes_tools.py)
+_RPC_DIR = os.environ.get("HERMES_RPC_DIR")
+
+def _call(tool_name, args):
+    seq_str = f"{_seq:06d}"
+    req_file = os.path.join(_RPC_DIR, f"req_{seq_str}")
+    res_file = os.path.join(_RPC_DIR, f"res_{seq_str}")
+
+    # Write request atomically (tmp + rename)
+    with open(tmp, "w") as f:
+        json.dump({"tool": tool_name, "args": args}, f)
+    os.rename(tmp, req_file)
+
+    # Poll for response
+    while not os.path.exists(res_file):
+        time.sleep(poll_interval)
+        poll_interval = min(poll_interval * 1.2, 0.25)
+```
+
+Agent 进程运行一个轮询线程（`_rpc_poll_loop`），定期通过 `env.execute("ls /tmp/hermes_rpc/")` 检查远程目录中的请求文件。发现请求后，读取内容、执行工具调用、将结果写入 `res_XXXXXX` 文件。
+
+请求文件使用原子写入（write to `.tmp` then `os.rename`）防止部分写入被读取。响应轮询使用自适应退避（50ms 起步，最大 250ms），平衡延迟和 CPU 占用。
+
+---
+
+## 15.4 RPC 服务器循环
+
+`_rpc_server_loop()` 是 UDS 传输的服务端：
+
+```python
+# tools/code_execution_tool.py:307-400
+def _rpc_server_loop(
+    server_sock, task_id, tool_call_log, tool_call_counter,
+    max_tool_calls, allowed_tools,
+):
+    conn, _ = server_sock.accept()
+    while True:
+        chunk = conn.recv(65536)
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            request = json.loads(line.decode())
+            tool_name = request.get("tool", "")
+            tool_args = request.get("args", {})
+
+            # Enforce allow-list
+            if tool_name not in allowed_tools:
+                resp = json.dumps({"error": f"Tool '{tool_name}' not available"})
+                ...
+
+            # Enforce call limit
+            if tool_call_counter[0] >= max_tool_calls:
+                resp = json.dumps({"error": "Tool call limit reached"})
+                ...
+
+            # Dispatch through handle_function_call
+            result = handle_function_call(tool_name, tool_args, task_id=task_id)
+```
+
+三层安全检查：
+
+1. **工具白名单**：只有 `allowed_tools`（`SANDBOX_ALLOWED_TOOLS` ∩ session enabled tools）中的工具可以被调用
+2. **调用次数限制**：`max_tool_calls`（默认 50）限制单次 execute_code 的总工具调用次数
+3. **Terminal 参数过滤**：`_TERMINAL_BLOCKED_PARAMS` 屏蔽 `background`、`pty`、`notify_on_complete`、`watch_patterns` 等参数，防止 sandbox 脚本启动后台进程或 PTY 会话
+
+标准输出重定向是一个值得注意的细节：dispatch 期间 `sys.stdout` 和 `sys.stderr` 被替换为 `/dev/null`，防止内部工具的状态打印（如 ✅ Enabled toolset... 消息）泄露到 CLI spinner 显示。
+
+---
+
+## 15.5 资源限制
+
+Sandbox 执行有严格的资源限制：
+
+```python
+# tools/code_execution_tool.py:67-70
+DEFAULT_TIMEOUT = 300        # 5 minutes
+DEFAULT_MAX_TOOL_CALLS = 50
+MAX_STDOUT_BYTES = 50_000    # 50 KB
+MAX_STDERR_BYTES = 10_000    # 10 KB
+```
+
+- **执行超时**：脚本最多运行 5 分钟。超时后进程被 kill，返回超时错误
+- **工具调用上限**：最多 50 次工具调用。超过后后续调用被拒绝
+- **输出大小上限**：stdout 最多 50 KB，stderr 最多 10 KB。超过部分被截断
+
+这些限制可通过 `config.yaml` 的 `code_execution` 段配置。上限存在的原因是 sandbox 的输出最终要返回给 LLM——一个 1 MB 的 stdout 会浪费大量 context window。
+
+---
+
+## 15.6 delegate_task：子 Agent 架构
+
+`tools/delegate_tool.py`（600+ 行）实现了 Agent 的自我复制能力——创建轻量级子 Agent 实例来处理独立的子任务。
+
+**DELEGATE_BLOCKED_TOOLS**
+
+子 Agent 不能使用 5 类工具：
+
+```python
+# tools/delegate_tool.py:32-38
+DELEGATE_BLOCKED_TOOLS = frozenset([
+    "delegate_task",   # 无递归委派
+    "clarify",         # 无用户交互
+    "memory",          # 不写共享 MEMORY.md
+    "send_message",    # 不发送跨平台消息
+    "execute_code",    # 子 Agent 应该逐步推理，不写脚本
+])
+```
+
+每一个禁令都有明确的理由。`delegate_task` 的禁令通过 `MAX_DEPTH` 更精确地控制：
+
+```python
+# tools/delegate_tool.py:53
+MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
+```
+
+父 Agent 的 `_delegate_depth` 为 0，子 Agent 继承 `depth + 1 = 1`。如果子 Agent 试图委派（depth = 1 >= MAX_DEPTH = 2 时被拒绝），系统返回错误。这限制了递归委派为最多一层——允许 parent → child，禁止 parent → child → grandchild。
+
+---
+
+## 15.7 _build_child_agent：子 Agent 构建
+
+子 Agent 的构建涉及大量的配置继承和过滤：
+
+```python
+# tools/delegate_tool.py:238-397
+def _build_child_agent(
+    task_index, goal, context, toolsets, model, max_iterations,
+    parent_agent, override_provider=None, ...
+):
+    # 1. 工具集计算：requested ∩ parent's tools - blocked
+    if toolsets:
+        child_toolsets = _strip_blocked_tools([t for t in toolsets if t in parent_toolsets])
+    elif parent_enabled is not None:
+        child_toolsets = _strip_blocked_tools(parent_enabled)
+
+    # 2. System prompt 构建
+    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint)
+
+    # 3. AIAgent 实例化
+    child = AIAgent(
+        model=effective_model,
+        enabled_toolsets=child_toolsets,
+        quiet_mode=True,
+        ephemeral_system_prompt=child_prompt,
+        skip_context_files=True,
+        skip_memory=True,
+        ...
+    )
+    child._delegate_depth = getattr(parent_agent, '_delegate_depth', 0) + 1
+```
+
+**工具集继承与过滤**：子 Agent 的可用工具是 `requested_toolsets ∩ parent_toolsets - blocked_toolsets` 的结果。子 Agent 永远不能拥有父 Agent 没有的工具——这是一个安全不变量。
+
+**上下文隔离**：`skip_context_files=True` 和 `skip_memory=True` 确保子 Agent 不读取父 Agent 的上下文文件和记忆。子 Agent 的对话从一个精心构建的 system prompt 开始，只包含 goal、context 和 workspace hint——不包含父 Agent 的完整对话历史。
+
+**凭据继承**：子 Agent 继承父 Agent 的 API key 和 base URL（或从 delegation 配置中获取覆盖值）。凭据池（`_credential_pool`）也被共享，让子 Agent 在遇到限流时能轮换到不同的 credential。
+
+**Workspace hint**：`_resolve_workspace_hint()` 尝试从父 Agent 的状态中提取当前工作目录的绝对路径，传给子 Agent 的 system prompt。这防止了子 Agent 猜测 `/workspace/...` 这样的假路径——一个在本地环境中常见的错误。
+
+---
+
+## 15.8 _run_single_child：心跳与资源管理
+
+子 Agent 在线程中运行。`_run_single_child()` 管理其完整的生命周期：
+
+```python
+# tools/delegate_tool.py:399-622
+def _run_single_child(task_index, goal, child, parent_agent):
+    # 1. Credential lease
+    if child_pool is not None:
+        leased_cred_id = child_pool.acquire_lease()
+
+    # 2. Heartbeat thread
+    def _heartbeat_loop():
+        while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+            parent_agent._touch_activity(
+                f"delegate_task: subagent {task_index} working"
+            )
+    _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    _heartbeat_thread.start()
+
+    # 3. Run conversation
+    result = child.run_conversation(user_message=goal)
+
+    # 4. Build tool trace
+    tool_trace = [...]  # 从 messages 中提取工具调用记录
+
+    # 5. Cleanup
+    _heartbeat_stop.set()
+    child_pool.release_lease(leased_cred_id)
+    child.close()
+```
+
+**心跳机制**（第 437-469 行）：子 Agent 执行期间，一个后台线程每 30 秒（`_HEARTBEAT_INTERVAL`）向父 Agent 的 `_touch_activity()` 发送活跃信号。这解决了 gateway 的不活跃超时问题——父 Agent 在等待 delegate_task 返回时自身没有工具调用，gateway 会认为它"不活跃"并终止连接。心跳线程的描述包含子 Agent 的当前状态（正在运行什么工具、第几次迭代），让监控者知道子 Agent 在做什么。
+
+**Tool trace**（第 500-534 行）：子 Agent 完成后，从其对话 messages 中提取工具调用记录。每条记录包含工具名、参数大小、结果大小、状态（ok/error）。这个 trace 被返回给父 Agent，让它了解子 Agent 做了什么——但不包含工具调用的完整内容（那会浪费父 Agent 的 context window）。
+
+**资源清理**（第 580-621 行）：在 `finally` 块中执行：
+1. 停止心跳线程
+2. 释放凭据 lease
+3. 恢复父 Agent 的 `_last_resolved_tool_names`（子 Agent 构建过程中可能修改了这个全局变量）
+4. 从父 Agent 的 `_active_children` 列表中移除（中断传播用）
+5. 调用 `child.close()` 释放子 Agent 的所有资源（terminal sandbox、browser daemon、httpx 客户端等）
+
+---
+
+## 15.9 并发执行
+
+delegate_task 支持 batch 模式——同时委派多个任务给多个子 Agent：
+
+```python
+# delegate_tool.py 中的并发执行
+max_concurrent = _get_max_concurrent_children()  # 默认 3
+
+with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+    futures = {}
+    for i, child in enumerate(children):
+        future = pool.submit(_run_single_child, i, tasks[i]["goal"], child, parent_agent)
+        futures[future] = i
+
+    for future in as_completed(futures):
+        result = future.result()
+        results.append(result)
+```
+
+`_DEFAULT_MAX_CONCURRENT_CHILDREN = 3` 限制同时运行的子 Agent 数量。这个值可通过 `config.yaml` 的 `delegation.max_concurrent_children` 或 `DELEGATION_MAX_CONCURRENT_CHILDREN` 环境变量配置。
+
+每个子 Agent 有独立的迭代预算（`DEFAULT_MAX_ITERATIONS = 50`），不和父 Agent 共享。这意味着 3 个并发子 Agent 理论上可以消耗 3 × 50 = 150 次 API 调用——用户需要意识到这个成本放大效应。
+
+子 Agent 的构建（`_build_child_agent()`）在主线程完成，确保线程安全。只有 `_run_single_child()` 在工作线程中执行。这是因为 AIAgent 的构造涉及模块级状态修改（如 `_last_resolved_tool_names`），不适合并行执行。
+
+---
+
+## 15.10 进度回调
+
+父 Agent 可以通过进度回调实时观察子 Agent 的工具调用：
+
+```python
+# tools/delegate_tool.py:158-235
+def _build_child_progress_callback(task_index, parent_agent, task_count=1):
+    def _callback(event_type, tool_name=None, preview=None, ...):
+        if event_type == "tool.started":
+            if spinner:  # CLI 模式
+                spinner.print_above(f" {prefix}├─ {emoji} {tool_name}")
+            if parent_cb:  # Gateway 模式
+                _batch.append(tool_name)
+                if len(_batch) >= _BATCH_SIZE:
+                    parent_cb("subagent_progress", f"🔀 {prefix}{summary}")
+                    _batch.clear()
+    return _callback
+```
+
+CLI 模式下，子 Agent 的工具调用以树形视图显示在父 Agent 的 delegation spinner 上方——用户能看到子 Agent 在做什么。
+
+Gateway（消息平台）模式下，工具调用被批量化（每 5 个一批）并通过父 Agent 的进度回调中继，减少消息平台的通知噪音。
+
+---
+
+## 本章小结
+
+`execute_code` 和 `delegate_task` 是 Hermes 工具体系中最"元"的两个工具——它们不直接完成任务，而是创建**执行其他工具的环境**。
+
+`execute_code` 通过动态生成 `hermes_tools.py` stub 模块和 UDS/文件 RPC 传输，让 LLM 编写的 Python 脚本能安全地调用 7 个沙箱允许的工具。资源限制（timeout、call count、output size）确保 sandbox 不会失控。
+
+`delegate_task` 通过创建隔离的子 AIAgent 实例，让复杂任务分解为可并行执行的子任务。工具集继承（子 ⊆ 父 - blocked）、深度限制（MAX_DEPTH=2）、心跳机制、凭据池共享、工具 trace 收集——每一个细节都为了在**能力复制**和**安全隔离**之间找到平衡。
+
+---
+
+## 速查表
+
+| 文件 | 行数 | 角色 |
+|------|------|------|
+| `tools/code_execution_tool.py` | 600+ | PTC 代码执行，RPC 传输，sandbox |
+| `tools/delegate_tool.py` | 600+ | 子 Agent 委派，并发控制，心跳 |
+
+| 概念 | 说明 |
+|------|------|
+| SANDBOX_ALLOWED_TOOLS | 7 个工具：web_search, web_extract, read/write/search/patch file, terminal |
+| hermes_tools.py | 动态生成的 Python 模块，包含工具 stub 函数 |
+| UDS 传输 | 本地后端使用 Unix Domain Socket 进行工具 RPC |
+| File-based RPC | 远程后端使用文件系统（req_/res_ 文件）进行工具 RPC |
+| 资源限制 | timeout=300s, max_tool_calls=50, stdout=50KB, stderr=10KB |
+| DELEGATE_BLOCKED_TOOLS | 5 个工具：delegate_task, clarify, memory, send_message, execute_code |
+| MAX_DEPTH=2 | 允许 parent→child，禁止 parent→child→grandchild |
+| 工具集继承 | child_tools = requested ∩ parent_tools - blocked_tools |
+| 心跳机制 | 每 30 秒向父 Agent 发送活跃信号，防止 gateway 超时 |
+| _DEFAULT_MAX_CONCURRENT_CHILDREN | 默认最多 3 个子 Agent 并发执行 |
+| Tool trace | 子 Agent 的工具调用摘要，包含工具名/参数大小/结果状态 |
+| 进度回调 | CLI 树形视图 / Gateway 批量化中继 |

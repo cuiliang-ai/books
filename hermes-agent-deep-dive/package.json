@@ -1,0 +1,39 @@
+{
+  "name": "hermes-agent-deep-dive-interactive",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Hermes Agent 源码深度解析 — Astro Starlight 增强版",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "migrate": "node scripts/migrate.mjs"
+  },
+  "keywords": [],
+  "author": "Liang Cui",
+  "license": "ISC",
+  "dependencies": {
+    "@astrojs/react": "^4.2.0",
+    "@astrojs/sitemap": "3.3.0",
+    "@astrojs/starlight": "0.32.2",
+    "astro": "5.5.5",
+    "d3": "^7.9.0",
+    "framer-motion": "^12.38.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.8",
+    "@tailwindcss/typography": "^0.5.19",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/d3": "^7.4.3",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "@astrojs/sitemap": "3.3.0"
+  }
+}

@@ -1,0 +1,412 @@
+---
+title: "第 21 章：Gateway 架构与 GatewayRunner"
+description: "一个 Agent 如何服务 15 个平台"
+sidebar:
+  order: 21
+---
+
+import GatewayArchitecture from '../../../components/diagrams/GatewayArchitecture.tsx';
+
+> **核心问题**：一个 Python 进程如何同时服务 15+ 个消息平台，既要处理并发会话，又要防止竞态条件？
+
+<GatewayArchitecture client:only="react" />
+
+---
+
+## 21.1 模块级引导：类定义之前的战场
+
+打开 `gateway/run.py`（8,982 行），你会发现前 510 行没有一个 class 关键字。这不是疏忽——它们是 Gateway 能正常运行的前提条件，在 Python `import` 阶段就必须完成。
+
+第一个要解决的问题是 SSL 证书。NixOS、Alpine、macOS Homebrew 等系统不总是把 CA 证书放在 Python 编译时硬编码的路径下。如果 `SSL_CERT_FILE` 没有设置，后续 import 的 discord.py、aiohttp 等库会在初始化时就尝试 TLS 握手并失败。`_ensure_ssl_certs()` 在第 35 行定义并**立即调用**：
+
+```python
+# gateway/run.py:35-72
+def _ensure_ssl_certs() -> None:
+    """Set SSL_CERT_FILE if the system doesn't expose CA certs to Python."""
+    if "SSL_CERT_FILE" in os.environ:
+        return  # user already configured it
+
+    import ssl
+    paths = ssl.get_default_verify_paths()
+    for candidate in (paths.cafile, paths.openssl_cafile):
+        if candidate and os.path.exists(candidate):
+            os.environ["SSL_CERT_FILE"] = candidate
+            return
+
+    try:
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+        return
+    except ImportError:
+        pass
+
+    for candidate in (
+        "/etc/ssl/certs/ca-certificates.crt",               # Debian/Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",                 # RHEL/CentOS 7
+        "/etc/ssl/cert.pem",                                 # Alpine / macOS
+        # ... 8 more candidates ...
+    ):
+        if os.path.exists(candidate):
+            os.environ["SSL_CERT_FILE"] = candidate
+            return
+
+_ensure_ssl_certs()
+```
+
+三级降级策略——Python 内置路径 → certifi bundle → 硬编码分发路径——覆盖了几乎所有 Linux/macOS 环境。注意它在第 72 行**模块顶层**就执行了，早于任何 `import aiohttp` 或 `import discord`。
+
+紧接其后的是环境变量加载和配置桥接。`config.yaml` 是 Hermes 的权威配置文件，但 AIAgent 及其工具链全部通过 `os.getenv()` 读取参数。桥接逻辑（第 92–209 行）把 `config.yaml` 的嵌套结构"展平"到环境变量中：
+
+```python
+# gateway/run.py:108-136
+_terminal_env_map = {
+    "backend": "TERMINAL_ENV",
+    "cwd": "TERMINAL_CWD",
+    "timeout": "TERMINAL_TIMEOUT",
+    "docker_image": "TERMINAL_DOCKER_IMAGE",
+    # ... 15 more mappings ...
+}
+for _cfg_key, _env_var in _terminal_env_map.items():
+    if _cfg_key in _terminal_cfg:
+        _val = _terminal_cfg[_cfg_key]
+        if isinstance(_val, list):
+            os.environ[_env_var] = json.dumps(_val)
+        else:
+            os.environ[_env_var] = str(_val)
+```
+
+桥接遵循一个一致的优先级规则：`.env` 文件中的值不会被 `config.yaml` 覆盖（顶层简单值使用 `_key not in os.environ` 守卫），但 `terminal` 命名空间例外——因为 `config.yaml` 是终端配置的**文档化入口**，必须比 `.env` 中的残留值优先。
+
+除了终端配置，桥接还处理 `auxiliary`（vision/web_extract/approval 模型）、`agent`（max_turns、timeout）、`display`、`timezone`、`security.redact_secrets` 等节点。整个桥接过程被包在 `try/except Exception: pass` 中——配置桥接失败不应阻止 Gateway 启动。
+
+模块级还做了两件重要的事：
+
+- `os.environ["HERMES_QUIET"] = "1"` —— Gateway 模式下禁止 Agent 的调试输出
+- `os.environ["HERMES_EXEC_ASK"] = "1"` —— 消息平台必须启用危险命令审批
+
+还有一个容易被忽视的细节：IPv4 偏好。某些网络环境（尤其是中国大陆）的 IPv6 路由不稳定，导致 API 调用超时。`apply_ipv4_preference(force=True)`（第 213 行）在 `config.yaml` 中 `network.force_ipv4: true` 时生效，修改 socket 的地址族优先级让 IPv4 优先。这必须在任何 HTTP 客户端创建之前执行。
+
+配置验证也在模块级完成。`print_config_warnings()`（第 222 行）检查 config.yaml 的结构，对未知的键名、错误的嵌套层级发出 WARNING。这些警告不阻止启动，但对排查配置问题极其有用——用户经常把 `terminal.backend` 写成 `terminal_backend` 或放错层级。
+
+最后两个环境变量设置揭示了 Gateway 模式的安全哲学：
+
+```python
+# gateway/run.py:228-231
+os.environ["HERMES_QUIET"] = "1"        # 禁止 Agent 调试输出
+os.environ["HERMES_EXEC_ASK"] = "1"     # 强制启用危险命令审批
+```
+
+`HERMES_EXEC_ASK` 在 CLI 终端模式下是可选的（用户可以直接看到命令输出并 Ctrl+C 中断），但在消息平台上是强制的——Telegram 用户无法中断一个正在执行 `rm -rf /` 的 Agent，所以危险命令必须先经过 `/approve` 审批。
+
+只有完成所有这些准备后，才 import `GatewayConfig`、`SessionStore`、`BasePlatformAdapter` 等类型。值得注意的是，这些 import 反过来又会触发各自模块的模块级代码——比如 `gateway/config.py` 的 `Platform` 枚举定义、`gateway/session.py` 的 PII 哈希函数等。整个模块导入链形成了一个有序的初始化瀑布。
+
+---
+
+## 21.2 GatewayRunner：一个进程的控制中心
+
+`GatewayRunner`（第 512 行）是 Gateway 的核心协调者。它的 `__init__` 方法长达 120 多行，初始化了十几个状态字典。我们逐一拆解。
+
+**类级别默认值**——注意第 522–532 行的类属性：
+
+```python
+# gateway/run.py:512-531
+class GatewayRunner:
+    # Class-level defaults so partial construction in tests doesn't
+    # blow up on attribute access.
+    _running_agents_ts: Dict[str, float] = {}
+    _busy_input_mode: str = "interrupt"
+    _restart_drain_timeout: float = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+    _exit_code: Optional[int] = None
+    _draining: bool = False
+    _restart_requested: bool = False
+    # ...
+```
+
+这个模式是为测试安全设计的。如果测试代码构造了一个 `GatewayRunner` 但跳过了某些初始化步骤，访问 `self._draining` 不会引发 `AttributeError`，而是返回类级别的默认值 `False`。
+
+**核心数据结构**——实例初始化中最关键的几个字段：
+
+| 字段 | 类型 | 用途 |
+|------|------|------|
+| `adapters` | `Dict[Platform, BasePlatformAdapter]` | 已连接的平台适配器 |
+| `session_store` | `SessionStore` | 会话持久化、过期策略 |
+| `_running_agents` | `Dict[str, Any]` | session_key → 正在运行的 AIAgent |
+| `_running_agents_ts` | `Dict[str, float]` | session_key → Agent 启动时间戳 |
+| `_pending_messages` | `Dict[str, str]` | 中断期间排队的消息 |
+| `_agent_cache` | `Dict[str, tuple]` | session_key → (AIAgent, config_sig) |
+| `_pending_approvals` | `Dict[str, Dict]` | 等待 /approve 的会话 |
+| `_failed_platforms` | `Dict[Platform, Dict]` | 连接失败的平台及重试信息 |
+
+`_agent_cache` 特别值得关注。没有它，每条消息都会创建一个新的 AIAgent，重建System Prompt词——这会破坏 Anthropic 等提供商的 prompt caching，导致成本增加约 10 倍。缓存以 `(AIAgent, config_signature_str)` 元组存储，当用户通过 `/model` 切换模型时 config_signature 改变，缓存自然失效。
+
+`_running_agents` 是并发控制的核心。它的值有三种状态：不存在（空闲）、`_AGENT_PENDING_SENTINEL`（正在初始化）、真实的 AIAgent 实例（正在运行）。这个三态机制我们在 21.4 节详细讨论。
+
+**初始化的其余工作**包括：安全扫描器预下载（`tirith_security`）、SQLite 会话搜索数据库、DM 配对存储（`PairingStore`）、事件钩子注册表（`HookRegistry`）、语音模式持久化等。每一个都被 `try/except` 包裹——单个子系统的初始化失败不应阻止 Gateway 运行。
+
+几个值得展开的初始化细节：
+
+`SessionStore` 的构造（第 553 行）接受一个 `has_active_processes_fn` 回调——它连接到 `process_registry.has_active_for_session(key)`，使得 SessionStore 在判断会话是否可以安全重置时能检查是否有后台进程仍在运行（参见第 9 章）。
+
+`PairingStore`（第 623 行）管理 DM 配对码的生成、验证和过期。每个配对码是一个 6 位数字，有效期 10 分钟，并有速率限制防止暴力猜测。
+
+`HookRegistry`（第 627 行）支持用户定义的事件钩子——Python 脚本放在 `~/.hermes/hooks/` 目录下，可以监听 `gateway:startup`、`session:start`、`command:*` 等事件。这为自动化运维提供了扩展点，比如在每次 Gateway 重启时发送通知。
+
+`_voice_mode`（第 631 行）是一个持久化的字典，记录每个聊天的语音回复模式（`off`/`voice_only`/`all`）。它被保存到 `~/.hermes/gateway_voice_mode.json`，重启后恢复。当适配器连接成功后，`_sync_voice_mode_state_to_adapter()` 将持久化的 voice-off 状态同步到适配器的 `_auto_tts_disabled_chats` 集合中。
+
+---
+
+## 21.3 启动流程：从零到多平台
+
+`start()` 方法（第 1467 行）是 Gateway 的启动入口，返回 `bool` 表示是否至少一个平台连接成功。
+
+**第一步：安全检查**。Gateway 扫描所有 `*_ALLOWED_USERS` 环境变量，如果没有找到任何白名单且 `GATEWAY_ALLOW_ALL_USERS` 未设置为 true，它会记录一个 WARNING——提醒运维人员所有未授权用户将被拒绝。这是**防御性默认**：不配置白名单 = 拒绝所有人，而非允许所有人。
+
+**第二步：钩子发现与加载**。`self.hooks.discover_and_load()` 扫描用户的钩子目录并注册事件处理器。
+
+**第三步：崩溃恢复**。`process_registry.recover_from_checkpoint()` 从检查点文件恢复上次崩溃时仍在运行的后台进程（参见第 9 章 process_registry）。
+
+**第四步：会话挂起**。这是一个精妙的设计。如果上次 Gateway 非正常退出（没有 `.clean_shutdown` 标记文件），那些处于 active 状态的会话可能已经处于损坏的中间状态。`suspend_recently_active()` 将它们标记为 "suspended"，下次收到消息时自动重置而不是试图恢复损坏的上下文。但如果上次是优雅退出（`hermes update` 或 `/restart`），之前的进程已经 drain 了所有活跃 Agent，会话是干净的——跳过挂起以避免不必要的重置：
+
+```python
+# gateway/run.py:1545-1558
+_clean_marker = _hermes_home / ".clean_shutdown"
+if _clean_marker.exists():
+    logger.info("Previous gateway exited cleanly — skipping session suspension")
+    try:
+        _clean_marker.unlink()
+    except Exception:
+        pass
+else:
+    try:
+        suspended = self.session_store.suspend_recently_active()
+        if suspended:
+            logger.info("Suspended %d in-flight session(s) from previous run", suspended)
+    except Exception as e:
+        logger.warning("Session suspension on startup failed: %s", e)
+```
+
+**第五步：平台连接循环**。遍历 `config.platforms`，对每个启用的平台调用 `_create_adapter()` 和 `adapter.connect()`：
+
+```python
+# gateway/run.py:1566-1603 (simplified)
+for platform, platform_config in self.config.platforms.items():
+    if not platform_config.enabled:
+        continue
+    adapter = self._create_adapter(platform, platform_config)
+    adapter.set_message_handler(self._handle_message)
+    adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
+    try:
+        success = await adapter.connect()
+        if success:
+            self.adapters[platform] = adapter
+            connected_count += 1
+        else:
+            # Queue for background reconnection
+            self._failed_platforms[platform] = {
+                "config": platform_config,
+                "attempts": 1,
+                "next_retry": time.monotonic() + 30,
+            }
+    except Exception as e:
+        self._failed_platforms[platform] = { ... }
+```
+
+连接失败不是致命的——平台被加入 `_failed_platforms` 字典，后台任务会按指数退避重试。只有当**所有**平台都失败且存在非可重试错误时，Gateway 才会退出。即使零个平台连接成功，Gateway 仍然会运行——因为它还需要执行 cron 任务。
+
+`_create_adapter()`（第 2111 行）是一个巨大的 if/elif 分支，根据 `Platform` 枚举值延迟导入对应的适配器类。延迟导入是有意为之的——Telegram 适配器拉取 `python-telegram-bot`，Discord 适配器拉取 `discord.py`，如果用户没安装某个依赖，只有对应的适配器加载失败，不影响其他平台。每个分支还调用平台对应的 `check_*_requirements()` 函数，做前置依赖检查：
+
+```python
+# gateway/run.py:2127-2133
+if platform == Platform.TELEGRAM:
+    from gateway.platforms.telegram import TelegramAdapter, check_telegram_requirements
+    if not check_telegram_requirements():
+        logger.warning("Telegram: python-telegram-bot not installed")
+        return None
+    return TelegramAdapter(config)
+```
+
+适配器工厂还有一个隐藏的细节：`group_sessions_per_user` 和 `thread_sessions_per_user` 通过 `config.extra` 字典注入到平台配置中（第 2117–2125 行），这样每个适配器在构造 session key 时不需要反向查询全局配置。
+
+**启动后续**。在所有平台连接完成后，`start()` 还执行了几个重要操作：
+
+- `delivery_router.adapters = self.adapters` —— 更新投递路由器的适配器引用，供 `send_message` 工具使用
+- `build_channel_directory(self.adapters)` —— 构建频道名称到 ID 的映射表，支持 `/send` 命令中用友好名称（如 "general"）代替数字 ID
+- 发射 `gateway:startup` 钩子事件
+- 检查 `/update` 后的重启恢复状态
+
+---
+
+## 21.4 消息路由：七步管线
+
+`_handle_message()`（第 2374 行）是所有平台适配器的消息入口点。每一条用户消息——无论来自 Telegram、Discord 还是 Signal——都流经这同一个方法。它实现了一个七步管线：
+
+**步骤 1：身份验证**
+
+```python
+# gateway/run.py:2390-2433 (simplified)
+if getattr(event, "internal", False):
+    pass  # Internal events bypass auth
+elif source.user_id is None:
+    return None  # No identity = drop silently
+elif not self._is_user_authorized(source):
+    # In DMs: offer pairing code
+    # In groups: silently ignore
+    if source.chat_type == "dm":
+        code = self.pairing_store.generate_code(...)
+        await adapter.send(source.chat_id, f"Pairing code: {code}")
+    return None
+```
+
+授权检查的优先级链是：平台级 ALLOW_ALL → 配对存储 → 平台白名单/全局白名单 → 全局 ALLOW_ALL → 默认拒绝。未授权的 DM 用户会收到一个配对码，要求机器人拥有者通过 `hermes pairing approve` 批准——这个流程比手动编辑白名单友好得多。配对响应有速率限制——通过 `_is_rate_limited()` 检查防止多条快速 DM 产生重复的配对消息。
+
+`_is_user_authorized()` 方法（第 2260 行）本身值得一看。它处理了大量的边缘情况：
+
+- HomeAssistant 和 Webhook 事件是系统生成的，始终授权（已通过 token/HMAC 认证）
+- `user_id` 为 None 的消息（Telegram 服务消息、匿名管理员操作）直接丢弃
+- WhatsApp 的 LID/JID 语法需要 `_expand_whatsapp_auth_aliases()` 解析
+- 白名单中的 `*` 通配符表示允许所有人（与 `ALLOW_ALL=true` 等价）
+- 邮箱格式的 user_id 同时检查完整地址和 `@` 前的用户名部分
+
+**步骤 2：更新提示响应拦截**。如果 `/update` 命令正在等待用户确认（`_update_prompt_pending`），消息被路由到更新流程而非 Agent。
+
+**步骤 3：陈旧锁驱逐**。这一步解决的是 `_running_agents` 中的泄漏问题——如果 Agent 线程崩溃或卡死而没有清理自己的锁，新消息就会被永远阻塞。驱逐逻辑检查两个条件：
+
+1. Agent 的**空闲时间**超过 `HERMES_AGENT_TIMEOUT`（默认 1800 秒）
+2. 或**绝对运行时间**超过 timeout × 10 或 2 小时（取较大值）
+
+关键在于它**不驱逐** `_AGENT_PENDING_SENTINEL`——sentinel 刚刚被放置，如果被驱逐会与正在进行的初始化流程竞态。
+
+**步骤 4：并发冲突处理**。当 `_quick_key in self._running_agents` 时，管线进入 "busy" 分支。这里的行为取决于命令类型：
+
+- `/stop` → 硬杀 Agent，挂起会话，解锁
+- `/new`、`/reset` → 中断 Agent，清除排队消息，执行重置
+- `/approve`、`/deny` → 绕过中断，直接路由到审批处理器
+- `/queue` → 静默排队，不中断
+- `/model` → 返回 "wait or /stop first"
+- PHOTO 类型消息 → 静默排队（album burst 合并）
+- 普通文本 → 中断 Agent，排队等待下一轮
+
+Sentinel 的独特处理也在这里：
+
+```python
+# gateway/run.py:2620-2633
+if running_agent is _AGENT_PENDING_SENTINEL:
+    # Agent is being set up but not ready yet.
+    if event.get_command() == "stop":
+        del self._running_agents[_quick_key]
+        return "⚡ Force-stopped. The agent was still starting — session unlocked."
+    # Queue the message
+    adapter._pending_messages[_quick_key] = event
+    return None
+```
+
+**步骤 5：命令分发**。如果没有活跃 Agent，消息可能是一个斜杠命令。Gateway 使用 `hermes_cli.commands.resolve_command()` 解析别名（如 `/n` → `/new`），然后路由到对应的 `_handle_*_command()` 方法。30 多个命令各有独立的处理器方法。
+
+**步骤 6：Agent 调度**。经过以上所有检查后，消息终于被送往 `_handle_message_with_agent()`。但在调用之前，Gateway 先放置 sentinel：
+
+```python
+# gateway/run.py:2925
+self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
+```
+
+`_AGENT_PENDING_SENTINEL`（第 316 行）是一个裸 `object()` 实例。它的作用是**在异步间隙中保护会话锁**。从 sentinel 放置到 AIAgent 实例替换之间，可能有 await 点让出控制权——如果另一条消息在这个间隙到达，它会看到 sentinel 而非空位，从而被排队而非重复调度。
+
+**步骤 7：Agent 对话**。`_handle_message_with_agent()`（第 3095 行）创建或复用 AIAgent，加载会话历史和上下文提示词，运行对话循环，处理会话过期通知和自动压缩。
+
+这个方法的第一件事是获取或创建 session entry，然后构建 session context——包含平台名、用户名、聊天类型等信息。context 被注入System Prompt词，让 Agent 知道自己在哪个环境中运行：
+
+```python
+# gateway/run.py:3106-3140 (simplified)
+session_entry = self.session_store.get_or_create_session(source)
+context = build_session_context(source, self.config, session_entry)
+context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
+```
+
+如果会话被自动重置（空闲超时或每日重置），方法会在 context prompt 前注入一条系统说明，告知 Agent 这是一个新对话而非用户主动 `/reset`。同时向用户发送通知消息，说明重置原因和如何使用 `/resume` 恢复。
+
+**自动压缩**（第 3260 行）是另一个重要功能。如果会话历史的估算 token 数超过模型上下文窗口的 85%，Gateway 会在 Agent 启动前主动压缩。这个阈值故意高于 Agent 自身的压缩阈值（50%）——pre-agent hygiene 是安全网，不是主要的上下文管理手段。
+
+**agent_cache 复用**在 `_resolve_session_agent_runtime()` 中完成。缓存命中的条件是 config signature 匹配——包括 model 名称、provider、base_url、api_key 等。任何一项变化（用户 `/model` 切换、config.yaml 修改）都会使缓存失效，创建新的 AIAgent 实例。
+
+这一步的细节跨越了 Agent 内核（第 6 章）和工具系统（第 9-13 章），此处点到为止。
+
+---
+
+## 21.5 会话管理
+
+Gateway 的会话管理由三个层次组成：`SessionSource`（消息来源描述）、`build_session_key()`（会话键生成）、`SessionStore`（持久化和过期策略）。
+
+**SessionSource**（`gateway/session.py:67`）是一个数据类，描述消息的完整来源：
+
+```python
+# gateway/session.py:67-85
+@dataclass
+class SessionSource:
+    platform: Platform
+    chat_id: str
+    chat_name: Optional[str] = None
+    chat_type: str = "dm"  # "dm", "group", "channel", "thread"
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    thread_id: Optional[str] = None  # Forum topics, Discord threads
+    chat_topic: Optional[str] = None
+    user_id_alt: Optional[str] = None  # Signal UUID
+    chat_id_alt: Optional[str] = None  # Signal group internal ID
+```
+
+**会话键**是将 SessionSource 映射为唯一字符串的函数。它的行为取决于两个配置项：
+
+- `group_sessions_per_user`（默认 true）：群聊中每个用户有独立会话
+- `thread_sessions_per_user`（默认 false）：论坛 thread 中是否隔离用户
+
+一个典型的会话键形如 `telegram:12345:user:67890`。PII 哈希可选——当 `privacy.redact_pii` 启用时，用户 ID 和聊天 ID 被替换为 SHA-256 的前 12 个十六进制字符。
+
+**SessionStore** 管理会话的生命周期：创建、加载转录历史、过期重置、memory flush。重置策略支持三种模式：
+
+1. **空闲超时**：默认 24 小时无消息后重置
+2. **每日固定时间**：如每天 UTC 4:00 重置
+3. **手动**：仅 `/new` 和 `/reset` 触发
+
+重置前的 **memory flush**（第 700 行）是一个精巧的机制：Gateway 构造一个临时的 AIAgent（`tmp_agent`），给它完整的对话历史和一条系统指令——"审查这段对话，把有价值的信息保存到记忆中"。这个 flush agent 只启用 `memory` 和 `skills` 两个工具集，`skip_memory=True` 防止它自己再触发记忆加载，`_print_fn = lambda *a, **kw: None` 完全静默输出。
+
+flush 的一个陷阱是并发写入。在 flush agent 运行期间，其他会话或 cron 任务可能已经更新了 MEMORY.md。为此 flush 提示词中包含当前 MEMORY.md 的完整内容，并明确指示："不要覆盖或移除现有条目，除非对话确实揭示了取代它们的信息"。
+
+---
+
+## 21.6 致命错误与优雅排空
+
+Gateway 的生命周期管理还有两个重要方面。
+
+**致命错误传播**。每个 adapter 都可以调用 `self._set_fatal_error(code, message, retryable=...)`，分为可重试（网络断线）和不可重试（token 无效、bot 锁冲突）。GatewayRunner 的 `_handle_adapter_fatal_error()` 回调决定后续动作：可重试的加入重连队列，不可重试的记录到运行时状态文件供 CLI 展示。
+
+**优雅排空（drain）**。当用户执行 `/restart` 或 `hermes update` 时，Gateway 不能立即退出——活跃的 Agent 对话可能正在使用工具。排空流程：
+
+1. 设置 `_draining = True`
+2. 新消息返回 "⏳ Gateway is restarting — queued for next turn"
+3. 等待所有 `_running_agents` 完成（或超时后中断）
+4. 断开所有适配器
+5. 写入 `.clean_shutdown` 标记
+6. 以 `GATEWAY_SERVICE_RESTART_EXIT_CODE` 退出
+
+`_restart_drain_timeout` 可通过 `config.yaml` 的 `agent.restart_drain_timeout` 配置，默认值由 `gateway/restart.py` 的常量定义。
+
+---
+
+## 速查表
+
+| 文件 / 位置 | 角色 |
+|-------------|------|
+| `gateway/run.py:35` | `_ensure_ssl_certs()` — NixOS/Alpine 兼容 |
+| `gateway/run.py:92-209` | config.yaml → env var 桥接 |
+| `gateway/run.py:316` | `_AGENT_PENDING_SENTINEL` — 并发锁定 sentinel |
+| `gateway/run.py:512` | `GatewayRunner` 类定义 |
+| `gateway/run.py:534` | `__init__` — 核心数据结构初始化 |
+| `gateway/run.py:700` | `_flush_memories_for_session()` — 重置前记忆保存 |
+| `gateway/run.py:1467` | `start()` — 启动流程 |
+| `gateway/run.py:2111` | `_create_adapter()` — 平台适配器工厂 |
+| `gateway/run.py:2374` | `_handle_message()` — 七步消息管线 |
+| `gateway/run.py:2925` | sentinel 放置 → Agent 调度 |
+| `gateway/run.py:3095` | `_handle_message_with_agent()` — 会话上下文和 Agent 调用 |
+| `gateway/session.py:67` | `SessionSource` — 消息来源数据类 |
+| `gateway/session.py` | `SessionStore` — 会话持久化 |
+| `gateway/restart.py` | drain timeout 常量和解析 |

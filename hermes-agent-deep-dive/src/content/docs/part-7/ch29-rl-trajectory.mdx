@@ -1,0 +1,318 @@
+---
+title: "第 29 章：RL 训练与 Trajectory 生成"
+description: "RL 训练流水线与轨迹生成"
+sidebar:
+  order: 29
+---
+
+import RLTrajectoryPipeline from '../../../components/flows/RLTrajectoryPipeline.tsx';
+
+> **核心问题**：Hermes Agent 的 "self-improving" 不仅仅是 Skill 和 Memory 的闭环（第 1 章）——它还有一整套强化学习基础设施，能够批量生成训练轨迹、与 Atropos 框架集成进行 RL 训练、并最终将训练结果反馈到模型本身。这套基础设施如何工作？
+
+<RLTrajectoryPipeline client:only="react" />
+
+---
+
+## 从自进化到自训练
+
+第 1 章描述了 Hermes 的"四阶段闭环"：执行任务 → 提炼 Skill → 持久记忆 → 会话召回。那个闭环是**运行时**的自进化——模型不变，但围绕它的知识基础在不断积累。本章描述的是另一个维度的闭环：**训练时**的自改进。
+
+这个训练闭环由四个组件支撑：`agent/trajectory.py` 定义轨迹格式和保存逻辑，`batch_runner.py` 批量并行生成轨迹数据，`toolset_distributions.py` 控制训练场景的工具分布，`environments/` 目录下的 Atropos 环境将 Hermes Agent 接入 RLHF/GRPO 训练流水线。让我们从数据格式开始，自底向上理解这个系统。
+
+---
+
+## 29.1 Trajectory 格式与保存
+
+Hermes 的轨迹采用 **ShareGPT 格式**——一个 `from` / `value` 对的列表，其中 `from` 是角色（`"human"` / `"gpt"` / `"tool"` / `"tool_call"`），`value` 是内容文本。这是 LLM 训练社区的事实标准格式，HuggingFace 的 SFT/DPO 训练工具链原生支持。
+
+`agent/trajectory.py` 提供了两个关键函数。`save_trajectory()` 将轨迹追加到 JSONL 文件：
+
+```python
+# agent/trajectory.py:30-56
+def save_trajectory(trajectory: List[Dict[str, Any]], model: str,
+                    completed: bool, filename: str = None):
+    if filename is None:
+        filename = "trajectory_samples.jsonl" if completed else "failed_trajectories.jsonl"
+
+    entry = {
+        "conversations": trajectory,
+        "timestamp": datetime.now().isoformat(),
+        "model": model,
+        "completed": completed,
+    }
+
+    try:
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("Failed to save trajectory: %s", e)
+```
+
+注意成功和失败的轨迹被分别写入不同的文件——`trajectory_samples.jsonl` 和 `failed_trajectories.jsonl`。这让训练数据清洗更容易：失败轨迹可以被用于 DPO 训练中的"rejected"样本。
+
+`convert_scratchpad_to_think()` 是另一个重要的转换函数（`trajectory.py:17`）。它将 Hermes 内部使用的 `<REASONING_SCRATCHPAD>` 标签转换为社区标准的 `<think>` 标签。这个转换发生在轨迹保存时，不影响运行时行为——推理过程被保留在训练数据中，但用的是目标模型能理解的标签格式。
+
+`has_incomplete_scratchpad()` 函数检查是否有未关闭的 `<REASONING_SCRATCHPAD>` 标签——如果模型在推理中途被打断（迭代预算耗尽、用户中断），内容会有不完整的标签对。这些样本需要在训练前过滤掉，否则模型会学到"推理可以不完整"的坏模式。
+
+轨迹的实际生成发生在 `AIAgent._convert_to_trajectory_format()` 方法中（`run_agent.py`，由 `batch_runner.py` 调用）。这个方法将 OpenAI 格式的 `messages` 列表（`role` / `content` / `tool_calls`）转换为 ShareGPT 格式。转换过程中，system message 被丢弃（不泄露System Prompt到训练数据），tool call 和 tool result 被保留为独立的对话轮次。
+
+---
+
+## 29.2 Batch Runner：大规模轨迹工厂
+
+`batch_runner.py` 是 Hermes 的轨迹生产线——它读取一个 JSONL 数据集，用 `multiprocessing.Pool` 并行处理每个 prompt，为每个 prompt 运行一个完整的 `AIAgent` 会话循环，然后将结果以 JSONL 格式写入磁盘。
+
+### 架构概览
+
+`BatchRunner` 类（`batch_runner.py:514`）是入口点。它的构造函数接收数据集路径、batch size、run name、toolset distribution 等参数，然后将数据集切分为 batch：
+
+```python
+# batch_runner.py:514-611
+class BatchRunner:
+    def __init__(self, dataset_file, batch_size, run_name,
+                 distribution="default", max_iterations=10,
+                 model="claude-opus-4-20250514", num_workers=4,
+                 # ... 更多参数 ...
+                 ):
+        self.dataset = self._load_dataset()
+        self.batches = self._create_batches()
+        # 输出目录: data/{run_name}/
+        self.output_dir = Path("data") / run_name
+        self.checkpoint_file = self.output_dir / "checkpoint.json"
+        self.stats_file = self.output_dir / "statistics.json"
+```
+
+`run()` 方法（`batch_runner.py:792`）是主循环。它创建一个 `multiprocessing.Pool`，将 batch 作为任务分发给 worker 进程。每个 worker 调用 `_process_batch_worker()`，它逐个处理 batch 中的 prompt，调用 `_process_single_prompt()` 运行 agent。
+
+### 单 Prompt 处理流程
+
+`_process_single_prompt()` 是最核心的函数（`batch_runner.py:233`）。它为每个 prompt 执行以下步骤：
+
+1. **采样 Toolset**：调用 `sample_toolsets_from_distribution()` 根据分布概率选择工具集
+2. **创建 Agent**：实例化 `AIAgent`，传入采样的 toolsets 和特殊标志（`skip_context_files=True`、`skip_memory=True`——不让 SOUL.md 和 AGENTS.md 污染轨迹数据）
+3. **运行会话**：调用 `agent.run_conversation(prompt, task_id=task_id)`——`task_id` 确保每个任务获得隔离的沙箱
+4. **提取统计**：`_extract_tool_stats()` 从 messages 中统计每个工具的调用次数、成功/失败率
+5. **转换轨迹**：`agent._convert_to_trajectory_format()` 将 messages 转为 ShareGPT 格式
+
+```python
+# batch_runner.py:305-367 (简化)
+def _process_single_prompt(prompt_index, prompt_data, batch_num, config):
+    selected_toolsets = sample_toolsets_from_distribution(config["distribution"])
+
+    agent = AIAgent(
+        model=config["model"],
+        max_iterations=config["max_iterations"],
+        enabled_toolsets=selected_toolsets,
+        save_trajectories=False,       # 手动处理保存
+        skip_context_files=True,       # 不污染轨迹
+        skip_memory=True,              # 不用持久记忆
+    )
+
+    result = agent.run_conversation(prompt, task_id=task_id)
+    tool_stats = _extract_tool_stats(result["messages"])
+    trajectory = agent._convert_to_trajectory_format(
+        result["messages"], prompt, result["completed"]
+    )
+    return {"success": True, "trajectory": trajectory, "tool_stats": tool_stats, ...}
+```
+
+### Checkpoint 与 Resume
+
+Batch 处理可能运行数小时甚至数天。`BatchRunner` 实现了完善的 checkpoint 机制：每完成一个 batch，立即写入增量 checkpoint（`batch_runner.py:926-943`）。checkpoint 记录了已完成的 prompt indices 和 batch 统计。
+
+resume 机制更加智能——它不仅看 checkpoint 中的 index，还扫描已有 batch 文件的**内容**（`_scan_completed_prompts_by_content()`，`batch_runner.py:714`），按 prompt 文本匹配来判断是否已完成。这意味着即使 index 变了（比如数据集被重新排序），已完成的 prompt 也不会被重复处理。
+
+### 数据质量过滤
+
+轨迹保存前会经过两层过滤。第一层是**推理覆盖率检查**：`_extract_reasoning_stats()` 统计有多少 assistant turn 包含推理内容（`<REASONING_SCRATCHPAD>` 或原生 thinking tokens）。完全没有推理的样本会被丢弃（`batch_runner.py:443-446`）——因为无推理的轨迹教不出会思考的模型。
+
+第二层是**工具合法性检查**：在最终合并所有 batch 文件时（`batch_runner.py:995-1036`），会检查每个条目的 `tool_stats` 中是否有不在 `ALL_POSSIBLE_TOOLS` 集合中的工具名。这些是模型幻觉出的假工具调用——它们会在 schema 中引入脏数据，必须过滤掉。`ALL_POSSIBLE_TOOLS` 从 `model_tools.py` 的 `TOOL_TO_TOOLSET_MAP` 自动派生，无需手动维护。
+
+### 工具统计规范化
+
+为了让 HuggingFace Datasets 能正确加载 JSONL（Arrow/Parquet 要求一致的 schema），`_normalize_tool_stats()` 确保**所有可能的工具**都出现在每条记录的 `tool_stats` 字段中——未使用的工具填充零值（`batch_runner.py:60-87`）。这是一个看似琐碎但实际上防止了训练流水线崩溃的关键细节。
+
+---
+
+## 29.3 Toolset Distributions：概率化工具采样
+
+`toolset_distributions.py` 定义了 15+ 个预置的工具分布。每个分布是一个 toolset → 概率的映射，表示该 toolset 被采样的百分比概率。
+
+```python
+# toolset_distributions.py:29-45
+DISTRIBUTIONS = {
+    "default": {
+        "description": "All available tools, all the time",
+        "toolsets": {
+            "web": 100, "vision": 100, "image_gen": 100,
+            "terminal": 100, "file": 100, "moa": 100, "browser": 100
+        }
+    },
+    "research": {
+        "description": "Web research with vision analysis and reasoning",
+        "toolsets": {
+            "web": 90, "browser": 70, "vision": 50,
+            "moa": 40, "terminal": 10
+        }
+    },
+    # ... 更多分布 ...
+}
+```
+
+`sample_toolsets_from_distribution()` 的采样逻辑是**独立 Bernoulli 采样**——每个 toolset 独立地以其概率被选中或不选中（`toolset_distributions.py:248-288`）。这意味着一个 prompt 可能获得零个、一个或多个 toolset 的任意组合。如果所有 toolset 都没被选中（低概率事件），自动回退到概率最高的那个。
+
+这个设计的目的是**数据多样性**。如果每个 prompt 都能用所有工具，模型会学到"总是先搜索、再执行"的固定模式。通过概率化采样，模型必须学会在工具受限时如何适应——有时只有 terminal，有时只有 web，有时两者兼有。这直接提升了模型在实际部署中的鲁棒性。
+
+预置分布覆盖了常见的训练场景：`terminal_tasks`（97% terminal + file，适配终端操作数据集）、`browser_tasks`（97% browser，适配网页交互数据集）、`mixed_tasks`（92% browser + terminal + file，适配复杂任务）、`science`（94% web + terminal + file，适配科学研究任务）、`creative`（90% image_gen + vision，适配创意生成任务）等。
+
+---
+
+## 29.4 Atropos RL 环境：从轨迹到强化学习
+
+轨迹数据的最终目的地是 RL 训练。Hermes 通过 `environments/` 目录下的 Atropos 环境实现这一点。Atropos 是 Nous Research 的 RL 训练框架（通过 `tinker-atropos` 子模块引入），它提供了 `BaseEnv` 基类和训练循环编排。
+
+### HermesAgentBaseEnv：桥接层
+
+`environments/hermes_base_env.py` 中的 `HermesAgentBaseEnv` 是核心桥接层。它继承自 `atroposlib.envs.base.BaseEnv`，处理所有 Atropos 集成的通用逻辑——子类只需要关注业务逻辑：
+
+```python
+# environments/hermes_base_env.py:1-17 (docstring 简化)
+"""
+Subclasses only need to implement:
+    setup()           -- Load dataset, initialize state
+    get_next_item()   -- Return the next item from the dataset
+    format_prompt()   -- Convert a dataset item into the user message
+    compute_reward()  -- Score the rollout (has full ToolContext access)
+    evaluate()        -- Periodic evaluation
+"""
+```
+
+`HermesAgentEnvConfig` 继承 `BaseEnvConfig`，添加了 Hermes 特有的配置字段：`enabled_toolsets`（显式工具列表）、`distribution`（概率化分布名）、`disabled_toolsets`（黑名单过滤）。Toolset 配置是**互斥**的——要么用 `enabled_toolsets` 显式指定，要么用 `distribution` 概率采样，二者不能同时使用。
+
+### HermesAgentLoop：可复用的多轮 Agent 引擎
+
+`environments/agent_loop.py` 中的 `HermesAgentLoop` 是 Hermes Agent 的"轻量版"——它复用了 `model_tools.py` 的 `handle_function_call()` 进行工具执行，但不需要完整的 `AIAgent` 类。这允许 Atropos 在 Phase 1（OpenAI server）和 Phase 2（VLLM ManagedServer）两种模式下运行 agent 循环。
+
+```python
+# environments/agent_loop.py:52-78
+@dataclass
+class AgentResult:
+    messages: List[Dict[str, Any]]       # 完整对话历史
+    managed_state: Optional[Dict] = None  # Phase 2 ManagedServer 状态
+    turns_used: int = 0                   # LLM 调用次数
+    finished_naturally: bool = False      # 是否自然结束（vs 迭代耗尽）
+    reasoning_per_turn: List[Optional[str]] = field(default_factory=list)
+    tool_errors: List[ToolError] = field(default_factory=list)
+```
+
+工具调用通过 `_tool_executor`（一个 128 线程的 `ThreadPoolExecutor`）执行，避免了 Atropos 的异步事件循环与工具 handler 内部的 `asyncio.run()` 冲突。`resize_tool_pool()` 允许在运行时调整线程池大小——当同时评估 89 个终端任务时（如 TerminalBench2），小线程池会导致饥饿。
+
+### ToolContext：为 Reward 函数打开所有工具
+
+RL 训练中最关键的组件之一是 reward function（奖励函数）。Hermes 的设计哲学是：reward function 应该能访问**所有** agent 工具，而且在模型使用的**同一个**沙箱中执行。`environments/tool_context.py` 中的 `ToolContext` 实现了这一点：
+
+```python
+# environments/tool_context.py:67-77
+class ToolContext:
+    """Open-ended access to all hermes-agent tools for a specific rollout."""
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+
+    def terminal(self, command: str, timeout: int = 180) -> Dict[str, Any]:
+        """Run a command in the rollout's terminal session."""
+        result = _run_tool_in_thread("terminal", {"command": command}, self.task_id)
+        # ...
+```
+
+`ToolContext` 使用与 rollout 相同的 `task_id`，这意味着它操作的是**同一个**终端会话——模型创建的文件、启动的进程、修改的环境变量，在 reward function 中全部可见。你可以在 `compute_reward()` 中运行 `pytest -v` 来验证模型的代码是否正确，或者用 `read_file()` 检查输出文件的内容。
+
+### 具体环境示例
+
+`environments/` 目录下有多个具体环境：
+
+- `terminal_test_env/` — 终端操作测试环境，验证模型能否正确执行 shell 命令
+- `hermes_swe_env/` — 软件工程环境，用于代码修复和功能实现的 RL 训练
+- `web_research_env.py` — 网络研究环境，评估模型的信息检索和综合能力
+- `agentic_opd_env.py` — 开放域对话环境
+- `benchmarks/` — 标准化评测环境（TBLite、TerminalBench2、YC Bench）
+
+每个环境都有对应的 tool call parser——`environments/tool_call_parsers/` 目录下有针对不同模型系列的解析器（Hermes、DeepSeek V3/V3.1、Qwen、GLM、Mistral、Llama、Kimi K2 等），处理各模型在非 OpenAI server 模式下的 tool call 格式差异。
+
+---
+
+## 29.5 RL CLI：专用训练命令行
+
+`rl_cli.py` 是 RL 工作流的专用 CLI 入口。它与主 CLI（`hermes` 命令）分开，因为 RL 训练有几个根本性的不同需求。
+
+首先是**超长超时**——RL 训练工作流可能运行数小时，`RL_MAX_ITERATIONS = 200`（是标准 CLI 的 90 的两倍多）。其次是**专用System Prompt**——`RL_SYSTEM_PROMPT`（`rl_cli.py:113-170`）是一个面向 RL 工程师的长指令，告诉模型如何发现环境、检查数据、创建环境、配置训练、测试推理、启动训练、监控指标。它描述了一个明确的八步工作流：DISCOVER → INSPECT → INSPECT DATA → CREATE → CONFIGURE → TEST → TRAIN → EVALUATE。
+
+第三是**限定 Toolset**——只启用 `["terminal", "web", "rl"]`，排除了不需要的工具。`rl` toolset 包含 10 个专用工具（`toolsets.py:135-145`）：`rl_list_environments`、`rl_select_environment`、`rl_get_current_config`、`rl_edit_config`、`rl_start_training`、`rl_check_status`、`rl_stop_training`、`rl_get_results`、`rl_list_runs`、`rl_test_inference`。
+
+```python
+# rl_cli.py:369-379
+agent = AIAgent(
+    base_url=base_url,
+    api_key=api_key,
+    model=model,
+    max_iterations=max_iterations,
+    enabled_toolsets=RL_TOOLSETS,       # ["terminal", "web", "rl"]
+    save_trajectories=save_trajectories,
+    quiet_mode=False,
+    ephemeral_system_prompt=RL_SYSTEM_PROMPT,
+)
+```
+
+`rl_cli.py` 还将终端工作目录设置为 `tinker-atropos` 子模块目录（行 43-52），确保 `terminal` 工具执行的命令在正确的上下文中运行。如果子模块不存在，回退到 hermes-agent 根目录。
+
+RL CLI 支持两种模式：单任务模式（`python rl_cli.py "Train a model on GSM8k"`）和交互模式（`python rl_cli.py --interactive`），后者提供一个持续的 REPL 循环，支持 `status` 快捷命令检查活跃训练运行。
+
+---
+
+## 29.6 端到端训练流水线
+
+将上述组件串联起来，Hermes 的 RL 训练流水线形成了一个完整的闭环：
+
+```
+┌─────────────┐    ┌───────────────┐    ┌──────────────┐    ┌──────────────┐
+│ JSONL 数据集  │───▶│  batch_runner  │───▶│ trajectories │───▶│  Atropos RL  │
+│ (prompts)   │    │  (并行生成)    │    │   .jsonl     │    │  (GRPO训练)  │
+└─────────────┘    └───────────────┘    └──────────────┘    └──────┬───────┘
+                                                                   │
+┌─────────────┐    ┌───────────────┐    ┌──────────────┐          │
+│  部署新模型   │◀───│  模型检查点    │◀───│  RL 奖励信号  │◀─────────┘
+│  (推理服务)  │    │  (权重更新)    │    │ (ToolContext) │
+└─────────────┘    └───────────────┘    └──────────────┘
+```
+
+数据准备阶段使用 `batch_runner.py` 在多个 worker 上并行运行 agent，为每个 prompt 生成完整的多轮对话轨迹。`toolset_distributions.py` 确保训练数据覆盖多种工具组合场景。生成的 `trajectories.jsonl` 是标准 ShareGPT 格式，可以直接被 HuggingFace Transformers / TRL 消费。
+
+训练阶段通过 `HermesAgentBaseEnv` 接入 Atropos。Atropos 运行 GRPO（Group Relative Policy Optimization）或其他 RL 算法，使用 `ToolContext` 在模型操作过的同一沙箱中计算 reward。`HermesAgentLoop` 在 VLLM ManagedServer 上运行推理，直接对被训练的模型进行 on-policy 采样。
+
+这个流水线的关键优势是**端到端**——从 prompt 到 trajectory 到 reward 到权重更新，全部在同一个代码仓库中完成。模型的工具调用能力不是通过静态 SFT 数据学来的，而是通过在真实环境中执行、获取真实反馈、进行真实 RL 更新来强化的。这就是 "self-improving" 的第二重含义——不仅是运行时的知识积累，更是训练时的能力提升。
+
+---
+
+## 速查表
+
+| 文件 | 角色 | 详见章节 |
+|------|------|---------|
+| `agent/trajectory.py` | 轨迹格式定义、保存、标签转换 | 本章 §29.1 |
+| `batch_runner.py` | 批量并行轨迹生成，checkpoint/resume | 本章 §29.2 |
+| `toolset_distributions.py` | 15+ 概率化工具分布定义 | 本章 §29.3 |
+| `environments/hermes_base_env.py` | Atropos 集成的抽象基类 | 本章 §29.4 |
+| `environments/agent_loop.py` | 可复用的多轮 Agent 引擎 | 本章 §29.4 |
+| `environments/tool_context.py` | Reward 函数的全工具访问 | 本章 §29.4 |
+| `rl_cli.py` | RL 专用 CLI（200 迭代，rl toolset） | 本章 §29.5 |
+| `environments/tool_call_parsers/` | 多模型 tool call 格式解析器 | 本章 §29.4 |
+
+| 设计决策 | 理由 |
+|---------|------|
+| ShareGPT 格式 | HuggingFace 生态兼容，SFT/DPO 工具链原生支持 |
+| 独立 Bernoulli 采样 | 生成多样化工具组合，提升模型鲁棒性 |
+| 同 task_id 的 ToolContext | Reward function 在模型的同一沙箱中执行 |
+| 128 线程工具池 | 支持并行评估数十个终端任务而不饥饿 |
+| 内容匹配 Resume | 比 index 匹配更鲁棒，数据集重排不影响续跑 |
+| 推理覆盖率过滤 | 丢弃无推理样本，确保训练数据质量 |
+
+> **下一步**：有了对 Hermes Agent 架构的全面理解——从第 1 章的产品愿景到本章的 RL 训练闭环——我们可以在第 30 章进行最后的综合：Hermes 的设计哲学是什么？它与 Claude Code、Aider、Codex CLI 等同类工具有什么本质区别？

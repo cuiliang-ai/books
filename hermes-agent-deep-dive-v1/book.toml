@@ -1,5 +1,5 @@
 [book]
-title = "Hermes Agent Deep Dive"
+title = "Hermes Agent Deep Dive (v1)"
 authors = ["Liang Cui"]
 description = "Nous Research 自进化 AI Agent 源码深度解析 — 基于 Python 源码全面剖析 Agentic Loop、工具生态、学习闭环、多平台网关"
 language = "zh"
@@ -12,5 +12,5 @@ create-missing = false
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "coal"
-site-url = "/hermes-agent-deep-dive/"
+site-url = "/hermes-agent-deep-dive-v1/"
 additional-css = ["custom.css"]
