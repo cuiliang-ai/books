@@ -23,37 +23,6 @@ import ArchitectureOverview from '../../../components/diagrams/ArchitectureOverv
 
 <ArchitectureOverview client:only="react" />
 
-下面是同一个架构的文本表示：
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  第 1 层 · 入口适配层                                            │
-│  CLI (cli.py) / Gateway (gateway/run.py) / ACP / Batch / MCP / RL│
-├─────────────────────────────────────────────────────────────────┤
-│  第 2 层 · 智能体引擎                                            │
-│  AIAgent.run_conversation()  —  run_agent.py:7544               │
-│  ┌──────────────┐ ┌──────────────┐ ┌────────────────────────┐   │
-│  │PromptBuilder │ │ContextEngine │ │ CredentialPool         │   │
-│  │(prompt_       │ │(context_     │ │ + SmartRouting         │   │
-│  │ builder.py)  │ │ compressor.py)│ │ (credential_pool.py)  │   │
-│  └──────────────┘ └──────────────┘ └────────────────────────┘   │
-├─────────────────────────────────────────────────────────────────┤
-│  第 3 层 · 工具编排层                                            │
-│  model_tools.py → tools/registry.py → 各 tools/*.py             │
-│  Toolset 定义 (toolsets.py)  ·  工具发现 (_discover_tools)       │
-├─────────────────────────────────────────────────────────────────┤
-│  第 4 层 · 执行后端层                                            │
-│  Terminal (local/docker/ssh/modal/daytona/singularity)           │
-│  Browser (Playwright/Browserbase)  ·  Web (Exa/Firecrawl)       │
-│  File I/O  ·  MCP Client  ·  Code Execution (UDS RPC)           │
-├─────────────────────────────────────────────────────────────────┤
-│  第 5 层 · 持久化与学习层                                         │
-│  SessionDB (hermes_state.py · SQLite+FTS5)                       │
-│  Memory (MEMORY.md / USER.md)  ·  Skills (skills/*.SKILL.md)    │
-│  Memory Plugins (Honcho/mem0/Holographic/...)                    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
 五层之间的调用方向是**严格单向的**——上层调用下层，下层不回调上层。唯一的例外是回调函数：`AIAgent` 通过 `tool_progress_callback`、`clarify_callback`、`stream_delta_callback` 等可调用对象把状态反馈给入口层。但这些回调是在 `__init__` 时注入的，不是下层反过来 import 上层。
 
 理解这个分层就够了。下面用一个真实请求把它走通。
