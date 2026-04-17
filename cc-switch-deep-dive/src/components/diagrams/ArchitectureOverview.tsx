@@ -164,6 +164,10 @@ export default function ArchitectureOverview() {
   const [playing, setPlaying] = useState(false);
   const [step, setStep] = useState<number>(-1);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const leftColRef = useRef<HTMLDivElement | null>(null);
+  const asideRef = useRef<HTMLDivElement | null>(null);
+  const [panelOffset, setPanelOffset] = useState<number>(0);
 
   const palette = {
     bg: isDark ? '#1a1a2e' : '#ffffff',
@@ -220,6 +224,37 @@ export default function ArchitectureOverview() {
     ? layers.flatMap((l) => l.modules).find((m) => m.id === selectedId)
     : null;
 
+  // 对齐右侧详情卡片到激活 chip 的垂直中心
+  const activeId = activeTraceId || selectedId;
+  useEffect(() => {
+    if (!activeId) return;
+    const recompute = () => {
+      const chip = chipRefs.current[activeId];
+      const leftCol = leftColRef.current;
+      const aside = asideRef.current;
+      if (!chip || !leftCol || !aside) return;
+      const chipRect = chip.getBoundingClientRect();
+      const colRect = leftCol.getBoundingClientRect();
+      const chipCenterY = chipRect.top + chipRect.height / 2 - colRect.top;
+      // 卡片高度粗估:基于当前可用宽度保守估计;用 ResizeObserver 二次校正
+      const cardHeight = aside.firstElementChild
+        ? (aside.firstElementChild as HTMLElement).offsetHeight
+        : 160;
+      const asideHeight = aside.clientHeight;
+      const desired = chipCenterY - cardHeight / 2;
+      const clamped = Math.max(0, Math.min(asideHeight - cardHeight, desired));
+      setPanelOffset(clamped);
+    };
+    recompute();
+    // 下一帧再算一次以获取准确 cardHeight
+    const raf = requestAnimationFrame(recompute);
+    window.addEventListener('resize', recompute);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', recompute);
+    };
+  }, [activeId, playing, step]);
+
   const footerContent = currentStep ? (
     <div style={{ color: palette.text, fontSize: 14, lineHeight: 1.7 }}>
       <div style={{ color: palette.accent, fontWeight: 600, fontSize: 12, marginBottom: 4 }}>
@@ -259,6 +294,7 @@ export default function ArchitectureOverview() {
     return (
       <button
         key={m.id}
+        ref={(el) => { chipRefs.current[m.id] = el; }}
         type="button"
         onClick={() => {
           if (playing) stopTrace();
@@ -400,13 +436,14 @@ export default function ArchitectureOverview() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'minmax(0, 1fr) minmax(240px, 320px)',
+          gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 340px)',
           gap: 0,
+          alignItems: 'stretch',
         }}
         className="cc-arch-grid"
       >
         {/* Left: layer stack */}
-        <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 0, minWidth: 0 }}>
+        <div ref={leftColRef} style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 0, minWidth: 0 }}>
           {layers.map((layer, i) => (
             <div key={layer.id}>
               {renderLayer(layer)}
@@ -439,31 +476,59 @@ export default function ArchitectureOverview() {
           </div>
         </div>
 
-        {/* Right: sticky detail panel */}
+        {/* Right: detail panel that floats next to the active chip */}
         <aside
+          ref={asideRef}
           style={{
             borderLeft: `1px solid ${palette.border}`,
             background: palette.footerBg,
-            padding: 16,
-            alignSelf: 'start',
-            position: 'sticky',
-            top: 16,
+            position: 'relative',
+            minHeight: '100%',
           }}
           className="cc-arch-aside"
         >
           <div
             style={{
-              fontSize: 11,
-              fontWeight: 700,
-              letterSpacing: 0.5,
-              color: palette.textMuted,
-              textTransform: 'uppercase',
-              marginBottom: 10,
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              padding: 16,
+              transform: `translateY(${panelOffset}px)`,
+              transition: 'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
             }}
+            className="cc-arch-panel"
           >
-            {currentStep ? '请求追踪' : selectedModule ? '模块详情' : '提示'}
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.5,
+                color: palette.textMuted,
+                textTransform: 'uppercase',
+                marginBottom: 10,
+              }}
+            >
+              {currentStep ? '请求追踪' : selectedModule ? '模块详情' : '提示'}
+            </div>
+            <div>{footerContent}</div>
+            {activeId && (
+              <div
+                aria-hidden
+                style={{
+                  position: 'absolute',
+                  left: -8,
+                  top: '50%',
+                  transform: 'translateY(-50%) rotate(45deg)',
+                  width: 14,
+                  height: 14,
+                  background: palette.footerBg,
+                  borderLeft: `1px solid ${palette.border}`,
+                  borderBottom: `1px solid ${palette.border}`,
+                }}
+              />
+            )}
           </div>
-          <div style={{ minHeight: 120 }}>{footerContent}</div>
         </aside>
       </div>
 
@@ -473,7 +538,11 @@ export default function ArchitectureOverview() {
           .cc-arch-aside {
             border-left: none !important;
             border-top: 1px solid ${palette.border};
+            min-height: 0 !important;
+          }
+          .cc-arch-panel {
             position: static !important;
+            transform: none !important;
           }
         }
       `}</style>
