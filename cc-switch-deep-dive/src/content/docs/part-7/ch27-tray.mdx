@@ -1,0 +1,168 @@
+---
+title: "第 27 章：系统托盘与快速切换"
+description: "动态菜单 + 平台差异 + 主题适配"
+sidebar:
+  order: 1
+---
+
+## 托盘的价值
+
+对"切换 Provider"这种高频操作，打开应用窗口太重。托盘菜单让用户：
+
+- 右键托盘图标 → 看到当前 App 的 Provider 列表
+- 点击目标 Provider → 立刻切换
+- 托盘图标实时反映代理状态（绿点 = 运行中）
+
+## tray.rs 结构
+
+`src-tauri/src/tray.rs` (481 行):
+
+```rust
+pub fn init_tray(app: &App) -> Result<(), AppError> {
+    let menu = build_tray_menu(app.state::<AppState>(), &get_db(app))?;
+    let icon = load_tray_icon(&app.handle())?;
+
+    TrayIconBuilder::new()
+        .tooltip("CC Switch")
+        .icon(icon)
+        .menu(&menu)
+        .on_menu_event(|app, event| {
+            handle_menu_click(app, event.id());
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+```
+
+## 动态菜单
+
+菜单结构：
+
+```
+CC Switch
+─────────────
+Claude Code ▶   (子菜单)
+  ● Anthropic
+    OpenAI
+    DeepSeek
+    ...
+Codex ▶
+  ● OpenAI
+    ...
+Gemini ▶
+  ...
+─────────────
+☑ Enable Proxy
+☑ Enable Failover
+─────────────
+Show Main Window
+Settings
+Quit
+```
+
+### 菜单更新时机
+
+- Provider 被添加 / 删除 / 重命名
+- Provider 切换（高亮变化）
+- Proxy / Failover 开关变化
+- Language 切换（菜单标签 i18n）
+
+每次都**重建菜单**：
+
+```rust
+pub fn update_tray_menu(app: &AppHandle, db: &Database) -> Result<(), AppError> {
+    let tray = app.tray_by_id("main").ok_or(...)?;
+    let menu = build_tray_menu(app.state::<AppState>(), db)?;
+    tray.set_menu(Some(menu))?;
+    Ok(())
+}
+```
+
+## 菜单项 ID 约定
+
+```rust
+fn menu_id(action: &str, args: &[&str]) -> String {
+    format!("{action}:{}", args.join(":"))
+}
+// e.g. "switch:claude:uuid-xyz"
+//      "toggle:proxy"
+```
+
+处理点击：
+
+```rust
+fn handle_menu_click(app: &AppHandle, id: &str) {
+    let parts: Vec<_> = id.split(':').collect();
+    match parts.as_slice() {
+        ["switch", app_type, provider_id] => { /* 切换 */ }
+        ["toggle", "proxy"] => { /* 开关代理 */ }
+        ["show"] => { /* 显示主窗口 */ }
+        ["quit"] => { /* 退出 */ }
+        _ => {}
+    }
+}
+```
+
+## 图标
+
+### 多分辨率 + 主题
+
+macOS 暗色模式需要白色图标，亮色需要黑色：
+
+```rust
+#[cfg(target_os = "macos")]
+fn select_tray_icon_for_appearance() -> Image<'_> {
+    if is_dark_mode() {
+        Image::from_bytes(include_bytes!("../icons/tray-white.png"))
+    } else {
+        Image::from_bytes(include_bytes!("../icons/tray-black.png"))
+    }
+}
+```
+
+Windows / Linux 用彩色图标，无需区分。
+
+### 状态指示
+
+代理运行时切换图标：
+
+```rust
+pub fn set_tray_status_icon(app: &AppHandle, running: bool) {
+    let icon = if running { ICON_RUNNING } else { ICON_IDLE };
+    app.tray_by_id("main").unwrap().set_icon(Some(icon)).ok();
+}
+```
+
+## 跨平台细节
+
+### macOS
+
+- 托盘在右上角菜单栏
+- 默认不显示 Dock 图标（用户可配置）
+- `NSAccessoryActivationPolicy` 控制
+
+### Windows
+
+- 系统托盘（右下角）
+- 第一次右键可能需要点两次（这是 Windows 的 API 限制）
+
+### Linux
+
+- 依赖 `StatusNotifierItem` 协议
+- KDE、GNOME 表现略有差异
+- 某些 WM 需要额外安装 `libappindicator`
+
+## 本章速查表
+
+| 文件 | 关键函数 |
+|------|---------|
+| `src-tauri/src/tray.rs` | `init_tray`, `update_tray_menu` |
+| `src-tauri/src/lib.rs` | `handle_menu_click` |
+| `src-tauri/icons/` | 多平台图标资源 |
+| `src-tauri/tauri.conf.json` | 托盘配置 |

@@ -1,0 +1,123 @@
+---
+title: "第 11 章：50+ Provider 预设"
+description: "provider_defaults.rs 的设计与扩展"
+sidebar:
+  order: 4
+---
+
+## 为什么要有内置预设
+
+如果用户每次都要手动填：
+- Provider 名称
+- Base URL
+- API 格式（Chat Completions / Messages / Responses / Gemini）
+- 模型列表
+- 图标
+
+那 cc-switch 就失去了意义。所以它内置了主流 Provider 的**预设模板**，一键添加后用户只需填 API Key。
+
+## provider_defaults.rs 结构
+
+```rust
+// src-tauri/src/provider_defaults.rs
+pub fn get_claude_defaults() -> Vec<ProviderTemplate> {
+    vec![
+        ProviderTemplate {
+            id: "openai",
+            name: "OpenAI",
+            website_url: "https://openai.com",
+            icon: "openai",
+            icon_color: "#00A67E",
+            settings_template: json!({
+                "provider": { "base_url": "https://api.openai.com/v1" }
+            }),
+            // ...
+        },
+        ProviderTemplate { id: "anthropic", ... },
+        ProviderTemplate { id: "deepseek", ... },
+        // 50+ 条
+    ]
+}
+
+pub fn get_codex_defaults() -> Vec<ProviderTemplate> { /* ... */ }
+pub fn get_gemini_defaults() -> Vec<ProviderTemplate> { /* ... */ }
+```
+
+## 预设的来源
+
+前端 `src/components/providers/AddProviderDialog.tsx` 会调用 `list_provider_defaults` 命令，拿到模板列表后展示为"快速添加"网格：
+
+```
+┌────────┬────────┬────────┬────────┐
+│OpenAI  │Claude  │Gemini  │ Cohere │
+├────────┼────────┼────────┼────────┤
+│Kimi    │GLM     │DeepSeek│ Qwen   │
+├────────┼────────┼────────┼────────┤
+│Groq    │xAI     │Mistral │ ...    │
+└────────┴────────┴────────┴────────┘
+```
+
+用户点击一个，立刻得到一个半填充的 Provider 表单，只需输入 API Key。
+
+## 图标系统
+
+cc-switch 使用 `@lobehub/icons-static-svg` 的品牌 SVG：
+
+```tsx
+// src/components/ProviderIcon.tsx
+import { IconPicker } from './IconPicker';
+
+function ProviderIcon({ name, color }: Props) {
+  const iconUrl = `/lobehub-icons/${name}.svg`;
+  return <img src={iconUrl} style={{ filter: ... }} />;
+}
+```
+
+`icon` 字段用品牌的 slug（`openai`、`anthropic`、`google`、`mistral` 等），`icon_color` 是自定义色值。
+
+## 自定义 Provider
+
+`UniversalProviderPanel` 提供完全自定义的 Provider 类型：
+
+- Base URL 随意
+- API 格式可选（OpenAI-compat / Anthropic / Gemini）
+- 自定义 headers
+- 自定义 body 转换脚本
+
+这个"逃生舱"保证了即使 cc-switch 没有内置某个小众 Provider，用户也能自己配。
+
+## 预设更新策略
+
+Provider 预设**打包在二进制里**，不走网络加载。原因：
+1. **启动时必须可用**，不能等网络
+2. **防止恶意上游注入** — 一个被劫持的 API 可能返回恶意模板
+3. **版本强绑定** — 预设变化需要 cc-switch 新版本
+
+缺点：新增 Provider 需要发新版本。Deep Link + 社区分享弥补了这一点。
+
+## Endpoints 多主机
+
+一个 Provider 可以配置**多个备用 endpoint**，在 meta 里：
+
+```json
+{
+  "meta": {
+    "endpoints": [
+      "https://api.primary.com/v1",
+      "https://api.fallback.com/v1"
+    ]
+  }
+}
+```
+
+代理层（第 13 章）会在多个 endpoint 间切换（速度优先 / 故障转移）。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/src/provider_defaults.rs` | 预设定义（238 行） |
+| `src/components/providers/AddProviderDialog.tsx` | 添加对话框 |
+| `src/components/ProviderIcon.tsx` | 图标渲染 |
+| `src/components/IconPicker.tsx` | 图标选择器 |
+| `src/components/universal/` | 通用 Provider |

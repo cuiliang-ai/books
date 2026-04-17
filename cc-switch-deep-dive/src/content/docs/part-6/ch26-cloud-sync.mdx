@@ -1,0 +1,135 @@
+---
+title: "第 26 章：WebDAV / 云盘同步"
+description: "多设备一致性与冲突解决"
+sidebar:
+  order: 4
+---
+
+## 为什么需要同步
+
+cc-switch 的数据在 `~/.cc-switch/`：
+- `config.json`
+- `cc-switch.db`
+- `skills/` 目录
+
+用户可能有多台设备（家、办公室、笔记本）。手动同步繁琐，所以 cc-switch 内置多种同步方式。
+
+## 两种同步模式
+
+### 模式 A：云盘同步（被动）
+
+Dropbox / OneDrive / iCloud / 坚果云 都提供"指定目录实时同步"。cc-switch 只需：
+
+1. **设置重定位** — 把 `~/.cc-switch/` 放到云盘目录
+2. **文件锁** — 防止多端同时写入
+
+在 `src/components/settings/` 里有设置入口，实际是**移动目录 + 创建符号链接**。
+
+优点：零配置，云盘软件负责。
+缺点：依赖云盘客户端。
+
+### 模式 B：WebDAV（主动）
+
+`services/webdav.rs` (554 行) + `services/webdav_sync.rs` (884 行) + `services/webdav_auto_sync.rs` (274 行) 实现完整的 WebDAV 客户端 + 同步逻辑。
+
+## WebDAV 客户端
+
+```rust
+// services/webdav.rs
+pub struct WebDavClient {
+    base_url: String,
+    auth: BasicAuth,
+    client: reqwest::Client,
+}
+
+impl WebDavClient {
+    pub async fn propfind(&self, path: &str) -> Result<Vec<RemoteFile>>;
+    pub async fn get(&self, path: &str) -> Result<Bytes>;
+    pub async fn put(&self, path: &str, body: Bytes) -> Result<()>;
+    pub async fn mkcol(&self, path: &str) -> Result<()>;
+    pub async fn delete(&self, path: &str) -> Result<()>;
+}
+```
+
+## 同步算法
+
+```
+Local state: scan local files → (path, mtime, hash)
+Remote state: PROPFIND → (path, mtime, size)
+
+Compare:
+  only_local → upload
+  only_remote → download
+  both_mtime_differ → resolve by hash + user choice
+```
+
+### 冲突解决策略
+
+| 冲突类型 | 策略 |
+|---------|------|
+| 本地修改晚 | 覆盖远程 |
+| 远程修改晚 | 覆盖本地 |
+| 同时修改 | 保留双方，标记 `.conflict-<timestamp>` |
+
+## 同步范围
+
+可选择同步：
+- 只 `config.json` — 轻量，秒级
+- config + db — 完整用量数据
+- config + db + skills — 包括所有
+- 自定义 — 只勾选特定 Provider / MCP / Skill
+
+## 自动同步
+
+`webdav_auto_sync.rs` (274 行) 用 tokio 定时器：
+
+```rust
+pub async fn start_auto_sync(config: AutoSyncConfig) {
+    let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
+    loop {
+        interval.tick().await;
+        if let Err(e) = run_sync(&config).await {
+            log::warn!("Auto sync failed: {e}");
+        }
+    }
+}
+```
+
+默认间隔 30 分钟，支持调整。
+
+## 加密
+
+API Key 是敏感数据。上传前可选 **AES 加密**：
+
+```rust
+let encrypted = encrypt_aes_gcm(content, user_password)?;
+webdav.put(&path, encrypted).await?;
+```
+
+密码不存储，每次同步时需输入（或用系统 keyring 缓存）。
+
+## UI
+
+```
+src/components/settings/WebdavSyncSection.tsx
+src/components/settings/BackupListSection.tsx
+src/components/settings/ImportExportSection.tsx
+```
+
+用户可以：
+- 配置 WebDAV 凭据
+- 手动触发同步
+- 查看同步历史
+- 导入/导出特定备份
+
+## 本章速查表
+
+| 文件 | 行数 |
+|------|------|
+| `services/webdav.rs` | 554 |
+| `services/webdav_sync.rs` | 884 |
+| `services/webdav_auto_sync.rs` | 274 |
+| `services/webdav_sync/` | 子模块 |
+| `commands/webdav_sync.rs` | 357 |
+| `commands/sync_support.rs` | 97 |
+| `src/components/settings/WebdavSyncSection.tsx` | - |

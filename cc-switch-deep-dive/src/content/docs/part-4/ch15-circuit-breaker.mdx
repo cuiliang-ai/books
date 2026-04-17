@@ -1,0 +1,169 @@
+---
+title: "第 15 章：熔断器三态机"
+description: "Closed / Open / HalfOpen 与错误率阈值"
+sidebar:
+  order: 4
+---
+
+## 熔断器模型
+
+熔断器模式起源于 Hystrix（Netflix），核心思想是**保护下游**。cc-switch 的实现在 `proxy/circuit_breaker.rs`，三态机：
+
+```
+    ┌──────────┐  连续失败达阈值   ┌──────────┐
+    │  Closed  │ ─────────────────▶│   Open   │
+    └─────┬────┘                   └─────┬────┘
+          ▲                              │
+          │                              │ timeout 到期
+          │ 半开测试成功达阈值            │
+          │                              ▼
+          │                         ┌──────────┐
+          └────────────────────────│ HalfOpen │
+                                    └──────────┘
+                                         │ 一次失败
+                                         ▼
+                                      回到 Open
+```
+
+## 配置
+
+```rust
+#[derive(Default)]
+pub struct CircuitBreakerConfig {
+    pub failure_threshold: u32,     // 默认 4
+    pub success_threshold: u32,     // 默认 2
+    pub timeout_seconds: u64,        // 默认 60
+    pub error_rate_threshold: f64,  // 默认 0.6
+    pub min_requests: u32,           // 默认 10
+}
+```
+
+**双维度触发**：
+1. **连续失败** N 次 → Open
+2. **错误率超阈值**（且样本数 ≥ min_requests）→ Open
+
+两种条件都能打开熔断器。错误率维度可以捕捉"慢性衰退"场景：单次看不明显，但整体错误率已不健康。
+
+## 原子操作
+
+```rust
+pub struct CircuitBreaker {
+    state: RwLock<CircuitState>,
+    failure_count: AtomicU32,
+    success_count: AtomicU32,
+    total_count: AtomicU32,
+    opened_at: RwLock<Option<Instant>>,
+    config: CircuitBreakerConfig,
+}
+
+impl CircuitBreaker {
+    pub async fn record_failure(&self) {
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
+        self.total_count.fetch_add(1, Ordering::Relaxed);
+
+        let failure = self.failure_count.load(Ordering::Relaxed);
+        let total = self.total_count.load(Ordering::Relaxed);
+
+        if failure >= self.config.failure_threshold {
+            self.open().await;
+            return;
+        }
+
+        if total >= self.config.min_requests {
+            let error_rate = failure as f64 / total as f64;
+            if error_rate >= self.config.error_rate_threshold {
+                self.open().await;
+            }
+        }
+    }
+
+    pub async fn record_success(&self) {
+        match *self.state.read().await {
+            CircuitState::HalfOpen => {
+                let cnt = self.success_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if cnt >= self.config.success_threshold {
+                    self.close().await;
+                }
+            }
+            _ => {
+                self.failure_count.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+}
+```
+
+用 `AtomicU32` 避免高并发下的锁竞争，只在**状态转换时**才取写锁。
+
+## 半开测试
+
+当 Open 状态持续 `timeout_seconds` 后，下一次请求会把状态转为 HalfOpen：
+
+```rust
+pub fn state(&self) -> CircuitState {
+    let state = *self.state.blocking_read();
+    if state == CircuitState::Open {
+        if let Some(opened_at) = *self.opened_at.blocking_read() {
+            if opened_at.elapsed().as_secs() >= self.config.timeout_seconds {
+                return CircuitState::HalfOpen;
+            }
+        }
+    }
+    state
+}
+```
+
+HalfOpen 状态下：
+- **允许请求通过**（测试上游是否恢复）
+- 失败 → 立即回到 Open
+- 成功 `success_threshold` 次 → 回到 Closed
+
+## 跨请求状态保持
+
+熔断器是按 **Provider** 维度的，`provider_router.rs` 用一个 HashMap 管理：
+
+```rust
+pub struct ProviderRouter {
+    breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+}
+
+async fn get_or_create_breaker(&self, provider_id: &str) -> Arc<CircuitBreaker> {
+    if let Some(b) = self.breakers.read().await.get(provider_id) {
+        return b.clone();
+    }
+    let b = Arc::new(CircuitBreaker::new(self.load_config().await));
+    self.breakers.write().await.insert(provider_id.into(), b.clone());
+    b
+}
+```
+
+**`Arc` 让多个请求共享同一个熔断器实例**——这是"跨请求状态保持"的实现。
+
+## 前端可视化
+
+`src/components/proxy/CircuitBreakerConfigPanel.tsx` 允许用户调整阈值。`src/components/providers/HealthStatusIndicator.tsx` 实时显示每个 Provider 的熔断状态（通过订阅 `circuit-state-changed` 事件）。
+
+## 手动重置
+
+用户可以在 UI 上点"重置熔断器"，对应命令：
+
+```rust
+#[tauri::command]
+pub async fn reset_circuit_breaker(
+    state: tauri::State<'_, AppState>,
+    provider_id: String,
+) -> Result<(), AppError> {
+    state.proxy_state.provider_router
+        .reset_breaker(&provider_id).await
+}
+```
+
+## 本章速查表
+
+| 文件 | 行数 |
+|------|------|
+| `proxy/circuit_breaker.rs` | - |
+| `proxy/provider_router.rs` | 512 |
+| `proxy/health.rs` | - |
+| `src/components/proxy/CircuitBreakerConfigPanel.tsx` | - |
+| `src/components/providers/HealthStatusIndicator.tsx` | - |

@@ -1,0 +1,163 @@
+---
+title: "第 19 章：MCP 统一管理与双向同步"
+description: "一次编辑同步到 Claude / Codex / Gemini / OpenCode"
+sidebar:
+  order: 1
+---
+
+## 问题背景
+
+MCP (Model Context Protocol) 是一个工具协议，每个 AI CLI 在自己的配置文件里都有 MCP 服务器列表：
+
+```json
+// ~/.claude.json
+{
+  "mcpServers": {
+    "filesystem": { "command": "npx", "args": ["-y", "@mcp/server-filesystem"] }
+  }
+}
+```
+
+```toml
+# ~/.codex/config.toml (Codex 用 TOML 嵌套数组)
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+```
+
+如果用户想让 4 个 CLI 都用同一套 MCP 服务器，**需要在 4 个地方手动同步**。cc-switch 的"统一 MCP 面板"解决了这个痛点。
+
+## SSOT 数据模型
+
+```rust
+// src-tauri/src/app_config.rs
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub enabled: bool,
+    pub apps: McpApps,  // 这个 server 应用到哪些 CLI
+    pub notes: Option<String>,
+}
+
+pub struct McpApps {
+    pub claude: bool,
+    pub codex: bool,
+    pub gemini: bool,
+    pub opencode: bool,
+    // OpenClaw 不支持 MCP
+}
+```
+
+**关键设计**：MCP 服务器只存一份（在 SSOT 的 `mcp_servers` IndexMap 中），`apps` 字段记录它"应该"出现在哪些 CLI 的 live 配置里。
+
+## 同步机制
+
+当用户：
+- 切换 `apps.claude = true` — 把 MCP 注入 Claude 配置
+- 切换 `apps.claude = false` — 从 Claude 配置移除
+- 编辑 `command/args/env` — 更新所有启用的 CLI 配置
+
+对应后端命令：
+
+```rust
+// src-tauri/src/mcp/mod.rs 或 commands/mcp.rs
+pub async fn sync_enabled_to_claude(servers: &[McpServer]) -> Result<()>;
+pub async fn sync_enabled_to_codex(servers: &[McpServer]) -> Result<()>;
+pub async fn sync_enabled_to_gemini(servers: &[McpServer]) -> Result<()>;
+pub async fn sync_single_server_to_claude(server: &McpServer) -> Result<()>;
+// ...
+```
+
+## 反向导入
+
+用户可能已经有 MCP 配置在 live 文件里。`import_from_*` 系列命令：
+
+```rust
+pub fn import_from_claude() -> Result<Vec<McpServer>, AppError> {
+    let path = get_default_claude_mcp_path();
+    let content = fs::read_to_string(&path)?;
+    let value: Value = json5::from_str(&content)?;
+
+    let servers = value["mcpServers"].as_object()
+        .into_iter()
+        .flat_map(|o| o.iter())
+        .map(|(name, def)| McpServer::from_json(name, def))
+        .collect();
+
+    Ok(servers)
+}
+```
+
+UI 流程：
+1. 用户点"导入现有 MCP"
+2. 后端扫描 3 个 CLI 的 MCP 配置
+3. 合并去重（按 name）
+4. 用户勾选要导入的 server
+5. 写入 SSOT + 设置 apps 标志
+
+## 双向同步的挑战：冲突
+
+问题：**如果用户手动改了 live 文件，cc-switch 不知道**。下次同步时会覆盖用户的更改。
+
+cc-switch 的策略：**写前不读**。切换或 enable 触发完整覆写。这意味着用户如果想保留自己的 live 修改，必须：
+1. 导入到 SSOT
+2. 在 cc-switch 里编辑
+
+这是**SSOT 架构的本质权衡**——换来的是"一次编辑，多处同步"。
+
+## 注入格式适配
+
+每种 CLI 的 MCP schema 不同：
+
+```rust
+impl McpServer {
+    pub fn to_claude_json(&self) -> Value {
+        json!({
+            "command": self.command,
+            "args": self.args,
+            "env": self.env,
+        })
+    }
+
+    pub fn to_codex_toml(&self) -> toml_edit::Item {
+        // TOML 嵌套表
+    }
+
+    pub fn to_gemini_json(&self) -> Value {
+        // Gemini 的略有不同
+    }
+}
+```
+
+## 向导式添加
+
+`src/components/mcp/McpWizardModal.tsx` 提供分步添加：
+
+1. 选择类型（stdio / HTTP / SSE）
+2. 输入 command / args / env
+3. 选择目标 apps
+4. 验证配置（尝试 launch）
+5. 保存
+
+## Deep Link 导入 MCP
+
+```
+ccswitch://v1/import?resource=mcp&name=filesystem&command=npx&args=@mcp/server-filesystem&apps=claude,codex
+```
+
+第 22 章详解。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/src/mcp/mod.rs` | MCP 解析 + 同步 |
+| `src-tauri/src/claude_mcp.rs` | Claude MCP 写入 |
+| `src-tauri/src/gemini_mcp.rs` | Gemini MCP 写入 |
+| `src-tauri/src/commands/mcp.rs` | MCP 命令（206 行） |
+| `src-tauri/src/services/mcp.rs` | MCP 服务（384 行） |
+| `src-tauri/src/database/dao/mcp.rs` | MCP DAO |
+| `src/components/mcp/UnifiedMcpPanel.tsx` | 统一 UI |
+| `src/components/mcp/McpWizardModal.tsx` | 向导 |

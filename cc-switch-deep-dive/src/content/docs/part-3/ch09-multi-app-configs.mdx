@@ -1,0 +1,170 @@
+---
+title: "第 9 章：多应用配置"
+description: "Claude / Codex / Gemini / OpenCode / OpenClaw 的配置异构性"
+sidebar:
+  order: 2
+---
+
+## 五种 CLI 的配置格式
+
+每个 CLI 都有自己的配置"风俗"，cc-switch 必须逐个适配：
+
+| CLI | 目录 | 主文件 | 格式 | 其他文件 |
+|-----|------|--------|------|---------|
+| Claude Code | `~/.claude/` | `settings.json` | JSON | `.claude.json` (MCP) |
+| Codex | `~/.codex/` | `config.toml` | TOML | `auth.json` (JSON) |
+| Gemini CLI | `~/.gemini/` | `settings.json` | JSON | - |
+| OpenCode | `~/.config/opencode/` | `config.json` | JSON | - |
+| OpenClaw | `~/.openclaw/` | (多文件) | JSON | 工具/Agent/Env 分离 |
+
+## Claude Code
+
+`src-tauri/src/config.rs` 负责 Claude 的配置：
+
+```rust
+pub fn get_claude_config_dir() -> PathBuf {
+    if let Some(custom) = settings::get_claude_override_dir() {
+        return custom;  // 用户可配置覆盖
+    }
+    get_home_dir().join(".claude")
+}
+
+pub fn get_claude_settings_path() -> PathBuf {
+    let dir = get_claude_config_dir();
+    let settings = dir.join("settings.json");
+    if settings.exists() {
+        return settings;
+    }
+    // 兼容旧版命名
+    let legacy = dir.join("claude.json");
+    ...
+}
+```
+
+注意两个细节：
+1. **目录可覆盖** — 高级用户可以重定向配置目录（多账户场景）
+2. **旧文件名兼容** — `claude.json` 是历史命名，cc-switch 向后兼容
+
+## Codex（最复杂）
+
+Codex 的特殊之处：**TOML 格式 + profile 系统**。
+
+```toml
+# ~/.codex/config.toml
+[profile.default]
+model_provider = "default"
+model = "gpt-4"
+
+[model_providers.default]
+base_url = "https://api.openai.com/v1"
+# auth 在 auth.json 里
+```
+
+```json
+// ~/.codex/auth.json
+{
+  "default": { "api_key": "sk-..." }
+}
+```
+
+`src-tauri/src/codex_config.rs` 用 `toml_edit`（保留格式的 TOML 解析器）来做**最小化 diff** 写入：
+
+```rust
+pub fn write_codex_live_atomic(
+    config_content: &str,
+    auth_content: &Value,
+) -> Result<(), AppError> {
+    let config_path = get_codex_config_path();
+    let auth_path = get_codex_auth_path();
+
+    // 解析为可编辑 TOML（保留注释和格式）
+    let mut doc: DocumentMut = config_content.parse()?;
+    // ... 修改内容
+
+    // 两个文件都要原子写入
+    atomic_write(&config_path, &doc.to_string())?;
+    write_json_file(&auth_path, auth_content)?;
+    Ok(())
+}
+```
+
+### Codex 多 Provider 命名
+
+```rust
+pub fn get_codex_provider_paths(
+    provider_id: &str,
+    provider_name: Option<&str>,
+) -> (PathBuf, PathBuf) {
+    let base_name = provider_name
+        .map(sanitize_provider_name)
+        .unwrap_or_else(|| sanitize_provider_name(provider_id));
+
+    // 为每个 Provider 保留一份独立的文件
+    let auth_path = get_codex_config_dir().join(format!("auth-{base_name}.json"));
+    let config_path = get_codex_config_dir().join(format!("config-{base_name}.toml"));
+
+    (auth_path, config_path)
+}
+```
+
+这是 cc-switch 的一个小妙招：**为每个 Provider 保留独立备份文件**，切换时直接从备份复制到 live。
+
+## Gemini
+
+`src-tauri/src/gemini_config.rs`：结构比 Claude 稍简单，但也有自己的怪癖。详见 `gemini_mcp.rs` 的 MCP 注入逻辑。
+
+## OpenCode
+
+`src-tauri/src/opencode_config.rs`（233 行）：相对年轻的项目，配置格式更规整。
+
+## OpenClaw（1,084 行的大模块）
+
+OpenClaw 的特殊之处在于**配置分散在多个文件**：
+- `env.json` — 环境变量
+- `tools/*.json` — 工具定义
+- `agents/*.json` — Agent 配置
+- `defaults.json` — 默认值
+
+所以 `openclaw_config.rs` 有 1K+ 行，实质上是一个小型子系统。对应的前端组件也多（`src/components/openclaw/`）。
+
+## 覆盖目录：settings::get_*_override_dir
+
+`settings.rs` 提供每个 CLI 的目录覆盖开关：
+
+```rust
+pub fn get_claude_override_dir() -> Option<PathBuf>;
+pub fn get_codex_override_dir() -> Option<PathBuf>;
+pub fn get_gemini_override_dir() -> Option<PathBuf>;
+// ...
+```
+
+用户可以在设置里指定"我的 Claude 配置不在 `~/.claude/`，在 `/mnt/shared/claude/`"。这对:
+- 多账户（企业/个人切换）
+- Dotfiles 管理
+- WSL / 远程开发
+
+都非常有用。
+
+## 读取时容错：json5 / json-five
+
+因为 cc-switch 可能读取用户手动编辑过的配置文件，所以采用容错解析：
+
+```rust
+use json5;
+let settings: Value = json5::from_str(&content)
+    .or_else(|_| serde_json::from_str(&content))?;
+```
+
+`json5` 允许：注释、尾逗号、单引号字符串。这使 cc-switch 能解析大多数人工写的 JSON。
+
+## 本章速查表
+
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `config.rs` | - | Claude 路径 + 通用 IO |
+| `codex_config.rs` | - | Codex TOML+JSON 原子写入 |
+| `gemini_config.rs` | - | Gemini settings.json |
+| `openclaw_config.rs` | 1,084 | OpenClaw 分散配置 |
+| `opencode_config.rs` | 233 | OpenCode 配置 |
+| `claude_mcp.rs` | - | Claude MCP 文件 |
+| `gemini_mcp.rs` | - | Gemini MCP 文件 |

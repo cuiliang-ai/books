@@ -1,0 +1,116 @@
+---
+title: "第 18 章：Thinking 预算矫正器"
+description: "extended thinking 的跨 Provider 适配"
+sidebar:
+  order: 7
+---
+
+## Claude extended thinking
+
+Claude Opus 4 / Sonnet 4 支持 "extended thinking"：
+
+```json
+{
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 10000
+  },
+  "max_tokens": 20000
+}
+```
+
+模型会先"思考"（生成不可见的推理 token），然后输出答案。但：
+- 并非所有上游 Provider 都支持此参数
+- 不同 Provider 的 budget 语义不同
+- 有些 Provider 会把 `thinking` 视为错误字段拒绝整个请求
+
+## 三个 Rectifier 的职责
+
+cc-switch 有**三个**专门处理 thinking 的模块：
+
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `proxy/thinking_optimizer.rs` | 274 | 优化器：决定是否启用、budget 大小 |
+| `proxy/thinking_budget_rectifier.rs` | 359 | 预算矫正：调整 budget_tokens 数值 |
+| `proxy/thinking_rectifier.rs` | 716 | 主矫正器：字段转换 + 去除 |
+
+## 字段去除
+
+对于不支持 thinking 的上游：
+
+```rust
+pub fn strip_thinking_for_provider(
+    body: &mut Value,
+    provider_kind: ProviderKind,
+) {
+    if !provider_kind.supports_thinking() {
+        body.as_object_mut().map(|o| o.remove("thinking"));
+    }
+}
+```
+
+## 预算矫正
+
+Claude 的 `max_tokens` **必须 > budget_tokens**。但用户可能配置了 `max_tokens=4096, budget_tokens=10000` 这种冲突组合。矫正器：
+
+```rust
+pub fn rectify_budget(body: &mut Value) {
+    let max = body["max_tokens"].as_u64();
+    let budget = body["thinking"]["budget_tokens"].as_u64();
+
+    if let (Some(m), Some(b)) = (max, budget) {
+        if b >= m {
+            // 自动调整
+            body["thinking"]["budget_tokens"] = (m - 1024).into();
+        }
+    }
+}
+```
+
+## 模型差异
+
+- Opus 4 默认 budget 比 Sonnet 4 大
+- 某些 OSS 模型（如 DeepSeek-R1）用 `<think>` 标签而非结构化字段
+- GPT-o1/o3 的"思考"不可控制，budget 参数无效
+
+Rectifier 维护一个模型 → 行为的映射表，针对性处理。
+
+## 与用户配置的交互
+
+`src/components/settings/RectifierConfigPanel.tsx` 允许用户调整矫正策略：
+
+```tsx
+<RectifierConfigPanel>
+  <Toggle label="自动去除不兼容字段" />
+  <Toggle label="自动调整预算冲突" />
+  <Select label="min budget">
+    <option>512</option>
+    <option>1024</option>
+    <option>2048</option>
+  </Select>
+</RectifierConfigPanel>
+```
+
+默认为最宽容策略（尽量让请求成功），高级用户可严格化。
+
+## Thinking 与 Usage 统计
+
+`proxy/usage/parser.rs` 解析响应时会区分：
+
+- `input_tokens` — 输入
+- `output_tokens` — 输出
+- `cache_creation_input_tokens` — 缓存写入
+- `cache_read_input_tokens` — 缓存读取
+- `cache_input_tokens` — 思考 token（Claude 把 thinking 归入缓存计费）
+
+这些都要分别计费（第 25 章）。
+
+## 本章速查表
+
+| 文件 | 行数 |
+|------|------|
+| `proxy/thinking_optimizer.rs` | 274 |
+| `proxy/thinking_budget_rectifier.rs` | 359 |
+| `proxy/thinking_rectifier.rs` | 716 |
+| `proxy/usage/parser.rs` | - |
+| `src/components/settings/RectifierConfigPanel.tsx` | - |

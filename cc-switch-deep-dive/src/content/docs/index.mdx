@@ -1,0 +1,228 @@
+---
+title: cc-switch 源码深度解析
+description: AI 编码 CLI 统一管理桌面应用 cc-switch 的源码深度解析
+template: splash
+hero:
+  tagline: 基于 Tauri 2 + React 18 + Rust 构建的 AI 编码 CLI 统一管理桌面应用 — 从产品定位到本地代理、熔断器、Failover、MCP 同步与 Session Manager 的全链路剖析
+  actions:
+    - text: 开始阅读
+      link: /cc-switch-deep-dive/part-1/ch01-product-vision/
+      icon: right-arrow
+    - text: 全景心智模型
+      link: /cc-switch-deep-dive/part-1/ch03-mental-model/
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="30 章深度拆解" icon="open-book">
+    从产品特性到代理内核、MCP 同步、Session Manager，逐层拆解约 34K 行 Rust + 大量 React 源码。每章附源码锚点，可边读边对照。
+  </Card>
+  <Card title="Tauri 2 实战教材" icon="seti:rust">
+    以 cc-switch 为标本，系统学习 Tauri 2 + React 18 架构：IPC Commands、tray、deep link、auto-updater、原子写入、SQLite 集成。
+  </Card>
+  <Card title="本地 AI 代理深度" icon="setting">
+    完整剖析基于 Axum + Hyper 的本地代理服务器：Provider Router、熔断器、Failover、SSE 流式转发、思考预算矫正等工业级特性。
+  </Card>
+  <Card title="开源 MIT" icon="github">
+    cc-switch 由 Jason Young 开发并以 MIT 协议开源。本书基于 v3.13.0 版本源码分析，可自由阅读、学习、商用参考。
+  </Card>
+</CardGrid>
+
+---
+
+## 核心数据
+
+| 指标 | 值 |
+|------|-----|
+| **版本** | v3.13.0 |
+| **语言** | Rust 1.85+ / TypeScript / React 18 |
+| **桌面框架** | Tauri 2.8 |
+| **后端代码量** | ~34,000 行 Rust |
+| **前端代码量** | 数百个 React 组件（TSX） |
+| **IPC Commands** | 约 30 个子模块，200+ 命令 |
+| **支持的 CLI 工具** | Claude Code / Codex / Gemini CLI / OpenCode / OpenClaw |
+| **Provider 预设** | 50+ |
+| **消息平台适配** | SSE + HTTP/1.1（含 preserve_header_case） |
+| **源码仓库** | [github.com/farion1231/cc-switch](https://github.com/farion1231/cc-switch) |
+
+---
+
+## 为什么值得读这本书
+
+cc-switch 把很多**实际但不显眼**的工程难题解决得很漂亮：
+
+- **原子写入** — 所有 live 配置使用 `temp file + rename` 模式，任何崩溃都不会破坏用户的 `~/.claude/settings.json`
+- **本地 HTTP 代理** — 用 Rust 手写 hyper accept loop，保留原始 header casing，使上游请求在协议层面与 CLI 直连一致
+- **熔断器 + Failover** — Closed / Open / HalfOpen 三态机，跨请求共享状态，支持错误率阈值 + 最小请求数双维度
+- **思考预算矫正** — 针对 Claude extended thinking 的多层 rectifier，解决不同 Provider 的参数差异
+- **多 App SSOT** — MCP 服务器 / Skills 在多个 CLI 间双向同步，单一数据源配合 `enabled_apps` 标记
+- **跨进程会话检索** — Session Manager 解析 6 种 CLI 的会话格式（JSONL / SQLite 等），统一展示
+
+本书把这些细节按"鸟瞰 → 骨架 → 数据 → 代理 → 扩展 → 存储 → 打包"的顺序拆开，帮助你：
+1. **学习 Tauri 2 实战** — 不是 hello-world，而是完整的生产级应用
+2. **学习 Rust 异步与网络编程** — Axum、Hyper、Tokio、rustls 的工业级组合
+3. **学习 React 18 + shadcn/ui 组织大型前端** — Radix UI + TanStack Query + i18next + Zod
+
+---
+
+## 本书结构
+
+全书 **7 部分 30 章 + 2 附录**：
+
+### 第一部分 · 鸟瞰 cc-switch
+
+| 章节 | 主题 | 核心问题 |
+|------|------|----------|
+| [第 1 章](/cc-switch-deep-dive/part-1/ch01-product-vision/) | 产品定位与设计目标 | 为什么 AI CLI 生态需要一个统一管理器？ |
+| [第 2 章](/cc-switch-deep-dive/part-1/ch02-architecture/) | 技术选型与架构全景 | Tauri 2 相比 Electron 的取舍？模块如何组织？ |
+| [第 3 章](/cc-switch-deep-dive/part-1/ch03-mental-model/) | 十分钟心智模型 | 一张总图建立全局认知 |
+
+### 第二部分 · Tauri 双端骨架
+
+| 章节 | 主题 |
+|------|------|
+| [第 4 章](/cc-switch-deep-dive/part-2/ch04-tauri-lifecycle/) | Tauri 2 应用生命周期：setup → run → RunEvent |
+| [第 5 章](/cc-switch-deep-dive/part-2/ch05-rust-module-map/) | Rust 后端模块地图：34 个顶层模块 |
+| [第 6 章](/cc-switch-deep-dive/part-2/ch06-react-architecture/) | React 前端组件架构：App.tsx → Panel → Query |
+| [第 7 章](/cc-switch-deep-dive/part-2/ch07-ipc-commands/) | IPC 通信与 Commands 层：200+ 命令的组织 |
+
+### 第三部分 · 配置与 Provider
+
+| 章节 | 主题 |
+|------|------|
+| [第 8 章](/cc-switch-deep-dive/part-3/ch08-provider-model/) | Provider 数据模型：SSOT + ProviderMeta |
+| [第 9 章](/cc-switch-deep-dive/part-3/ch09-multi-app-configs/) | 多应用配置：Claude / Codex / Gemini / OpenCode / OpenClaw |
+| [第 10 章](/cc-switch-deep-dive/part-3/ch10-atomic-writes/) | 原子写入与配置安全：temp + rename 模式 |
+| [第 11 章](/cc-switch-deep-dive/part-3/ch11-provider-presets/) | 50+ Provider 预设：`provider_defaults.rs` 详解 |
+
+### 第四部分 · 本地代理与热切换
+
+| 章节 | 主题 |
+|------|------|
+| [第 12 章](/cc-switch-deep-dive/part-4/ch12-proxy-architecture/) | 本地代理服务器架构：Axum + hyper 手写 accept loop |
+| [第 13 章](/cc-switch-deep-dive/part-4/ch13-provider-router/) | Provider Router 与转发链路 |
+| [第 14 章](/cc-switch-deep-dive/part-4/ch14-protocol-adapters/) | Claude / Codex / Gemini 协议适配 |
+| [第 15 章](/cc-switch-deep-dive/part-4/ch15-circuit-breaker/) | 熔断器三态机：Closed / Open / HalfOpen |
+| [第 16 章](/cc-switch-deep-dive/part-4/ch16-auto-failover/) | 自动 Failover 与切换锁 |
+| [第 17 章](/cc-switch-deep-dive/part-4/ch17-streaming-sse/) | 流式响应与 SSE |
+| [第 18 章](/cc-switch-deep-dive/part-4/ch18-thinking-rectifier/) | Thinking 预算矫正器 |
+
+### 第五部分 · MCP / Skills / Prompts
+
+| 章节 | 主题 |
+|------|------|
+| [第 19 章](/cc-switch-deep-dive/part-5/ch19-mcp-sync/) | MCP 统一管理与双向同步 |
+| [第 20 章](/cc-switch-deep-dive/part-5/ch20-skills-system/) | Skills 系统与 SSOT |
+| [第 21 章](/cc-switch-deep-dive/part-5/ch21-prompts/) | Prompts 与系统提示管理 |
+| [第 22 章](/cc-switch-deep-dive/part-5/ch22-deeplink/) | Deep Link 导入协议 (`ccswitch://`) |
+
+### 第六部分 · 存储、用量与云同步
+
+| 章节 | 主题 |
+|------|------|
+| [第 23 章](/cc-switch-deep-dive/part-6/ch23-sqlite-dao/) | SQLite DAO 与迁移 |
+| [第 24 章](/cc-switch-deep-dive/part-6/ch24-session-manager/) | Session Manager 跨工具会话 |
+| [第 25 章](/cc-switch-deep-dive/part-6/ch25-usage-stats/) | 用量统计与成本追踪 |
+| [第 26 章](/cc-switch-deep-dive/part-6/ch26-cloud-sync/) | WebDAV / Dropbox / OneDrive / iCloud 同步 |
+
+### 第七部分 · 横切关注点与扩展
+
+| 章节 | 主题 |
+|------|------|
+| [第 27 章](/cc-switch-deep-dive/part-7/ch27-tray/) | 系统托盘与快速切换 |
+| [第 28 章](/cc-switch-deep-dive/part-7/ch28-i18n-theme/) | 国际化与主题 |
+| [第 29 章](/cc-switch-deep-dive/part-7/ch29-packaging/) | 打包发布与自动更新 |
+| [第 30 章](/cc-switch-deep-dive/part-7/ch30-extension/) | 扩展实战与设计哲学 |
+
+### 附录
+
+| 附录 | 主题 |
+|------|------|
+| [附录 A](/cc-switch-deep-dive/appendix/appendix-a-source-index/) | 源码锚点索引 |
+| [附录 B](/cc-switch-deep-dive/appendix/appendix-b-config-reference/) | 配置文件参考 |
+
+---
+
+## 源码目录速览
+
+```
+cc-switch/
+├── src/                          # React 18 前端 (TypeScript)
+│   ├── App.tsx                   # 顶层应用 + AppSwitcher
+│   ├── main.tsx                  # bootstrap + 错误处理
+│   ├── components/               # ~30 个业务子目录
+│   │   ├── providers/            # Provider 列表 / 表单
+│   │   ├── mcp/                  # MCP 统一面板
+│   │   ├── skills/               # Skills 面板
+│   │   ├── prompts/              # 系统提示管理
+│   │   ├── proxy/                # 代理开关 + 熔断器配置
+│   │   ├── sessions/             # 会话管理
+│   │   ├── settings/             # 设置中心 (18 个子页面)
+│   │   ├── universal/            # 通用 Provider
+│   │   └── ui/                   # shadcn/ui 组件
+│   ├── lib/query/                # TanStack Query 封装
+│   ├── hooks/                    # 自定义 Hook
+│   └── i18n/                     # i18next 多语言
+├── src-tauri/                    # Tauri + Rust 后端
+│   └── src/
+│       ├── lib.rs                # 1,719 行 - 应用入口 + setup
+│       ├── commands/             # 30 个 IPC 命令模块
+│       │   ├── provider.rs       # Provider CRUD + 切换
+│       │   ├── proxy.rs          # 代理开关
+│       │   ├── mcp.rs            # MCP 管理
+│       │   └── ...
+│       ├── proxy/                # 本地代理服务器（15 文件 / ~7K 行）
+│       │   ├── server.rs         # Axum + hyper accept loop
+│       │   ├── provider_router.rs # 路由 + 熔断集成
+│       │   ├── circuit_breaker.rs # 三态熔断器
+│       │   ├── providers/        # Claude / Codex / Gemini 适配器
+│       │   └── thinking_*.rs     # 思考预算矫正
+│       ├── database/             # SQLite DAO (migration / backup)
+│       ├── session_manager/      # 6 种 CLI 会话格式解析
+│       ├── services/             # 业务服务层 (skill / webdav / usage)
+│       ├── deeplink/             # ccswitch:// 深链接
+│       ├── app_config.rs         # MultiAppConfig + McpServer
+│       ├── provider.rs           # Provider 模型 + SSOT
+│       ├── codex_config.rs       # Codex TOML 原子写入
+│       ├── gemini_config.rs      # Gemini settings.json 写入
+│       └── tray.rs               # 托盘菜单
+└── docs/ + session-manager.md    # 产品/设计文档
+```
+
+---
+
+## 阅读约定
+
+本书所有**函数名、文件名、行号**均基于 **cc-switch v3.13.0** 的真实源码。引用格式：
+
+> `ProxyServer::new()` in `src-tauri/src/proxy/server.rs:57` — 代理服务器构造函数
+
+每章末尾附 **源码锚点速查表**。
+
+## 阅读建议
+
+- **产品视角**：读 第 1-3 章即可了解全貌
+- **学 Tauri 2**：重点第 2、4-7、27、29 章
+- **学本地 AI 代理**：重点第 12-18 章
+- **学 AI 工具链工程化**：重点第 9、10、19-22 章
+- **学会话管理**：重点第 23-25 章
+
+## 关于
+
+- **作者**：[Liang Cui](https://cuiliang.ai/about/)
+- **分析对象**：cc-switch v3.13.0
+- **上游仓库**：[github.com/farion1231/cc-switch](https://github.com/farion1231/cc-switch) (MIT License, by Jason Young)
+- **状态**：持续更新
+
+---
+
+## 声明
+
+> **本书仅供学习和研究目的使用。**
+
+- **开源许可**：cc-switch 采用 MIT 许可证。本书引用的代码片段遵循 MIT 许可的合理使用。
+- **非官方**：本书为独立的第三方研究作品，未经 cc-switch 作者 Jason Young 授权、赞助或认可。
+- **商标**：Claude Code、Codex、Gemini CLI 等均为各自所有者的商标，本书中的使用仅为描述性引用。
+- **免责**：本书内容仅供参考，不构成任何形式的技术建议或保证。

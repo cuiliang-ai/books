@@ -1,0 +1,151 @@
+---
+title: "附录 A：源码锚点索引"
+description: "按文件大小排序的关键符号索引"
+sidebar:
+  order: 1
+---
+
+## Rust 模块（按行数排序）
+
+| 文件 | 行数 | 关键符号 |
+|------|------|---------|
+| `services/skill.rs` | 2,957 | `SkillStore`, `migrate_skills_to_ssot` |
+| `services/proxy.rs` | 2,819 | 代理客户端服务 |
+| `proxy/providers/transform_gemini.rs` | 2,152 | Claude↔Gemini 转换 |
+| `services/usage_stats.rs` | 1,930 | `get_usage_summary` |
+| `services/stream_check.rs` | 1,836 | 流式连通性测试 |
+| `proxy/providers/copilot_auth.rs` | 1,820 | GitHub Copilot 认证 |
+| `lib.rs` | 1,719 | `run()`, `setup` |
+| `commands/misc.rs` | 1,518 | 杂项命令 |
+| `proxy/providers/transform_responses.rs` | 1,329 | Claude↔Responses API |
+| `proxy/providers/claude.rs` | 1,313 | Claude Messages 处理 |
+| `services/subscription.rs` | 1,309 | Copilot 订阅 |
+| `proxy/providers/transform.rs` | 1,193 | Claude↔OpenAI 转换 |
+| `proxy/providers/codex_oauth_auth.rs` | 1,132 | Codex OAuth |
+| `openclaw_config.rs` | 1,084 | OpenClaw 配置（5+ 文件） |
+| `proxy/providers/streaming_responses.rs` | 1,070 | Responses SSE |
+| `proxy/providers/streaming_gemini.rs` | 1,054 | Gemini SSE |
+| `proxy/response_processor.rs` | 1,007 | 响应加工 |
+| `provider.rs` | 997 | `Provider`, `ProviderManager` |
+| `session_manager/providers/opencode.rs` | 997 | OpenCode 会话 |
+| `database/dao/proxy.rs` | 916 | Proxy DAO |
+| `services/webdav_sync.rs` | 884 | WebDAV 同步 |
+| `proxy/providers/streaming.rs` | 821 | 通用 SSE |
+| `services/session_usage_codex.rs` | 813 | Codex 会话用量 |
+| `settings.rs` | 742 | `AppSettings` |
+| `proxy/session.rs` | 636 | 请求 session |
+| `database/dao/providers.rs` | 636 | Providers DAO |
+| `services/session_usage.rs` | 639 | Claude 会话用量 |
+| `usage_script.rs` | 644 | JavaScript 余额脚本 |
+| `services/omo.rs` | 560 | OpenAI-compat |
+| `services/webdav.rs` | 554 | WebDAV 客户端 |
+| `proxy/providers/mod.rs` | 515 | Provider trait |
+| `proxy/provider_router.rs` | 512 | 路由 + 熔断 |
+| `commands/provider.rs` | 500 | Provider CRUD |
+| `session_manager/providers/claude.rs` | 500 | Claude 会话 |
+| `proxy/types.rs` | 488 | `ProxyConfig`, `ProxyStatus` |
+| `tray.rs` | 481 | 系统托盘 |
+| `session_manager/providers/openclaw.rs` | 476 | OpenClaw 会话 |
+| `services/coding_plan.rs` | 451 | Codex plans |
+| `proxy/providers/gemini.rs` | 442 | Gemini 处理 |
+| `commands/proxy.rs` | 422 | Proxy 命令 |
+| `services/balance.rs` | 411 | 余额查询 |
+| `session_manager/providers/codex.rs` | 400 | Codex 会话 |
+| `proxy/providers/gemini_shadow.rs` | 389 | thoughtSignature |
+| `services/mcp.rs` | 384 | MCP 服务 |
+| `commands/webdav_sync.rs` | 357 | WebDAV 命令 |
+| `commands/stream_check.rs` | 364 | 流式测试命令 |
+| `commands/workspace.rs` | 362 | 工作区命令 |
+| `proxy/thinking_rectifier.rs` | 716 | 思考矫正 |
+| `proxy/thinking_budget_rectifier.rs` | 359 | 预算矫正 |
+| `proxy/server.rs` | 354 | 代理服务器 |
+| `proxy/model_mapper.rs` | 345 | 模型名映射 |
+| `proxy/sse.rs` | 344 | SSE 解析 |
+| `commands/skill.rs` | 341 | Skill 命令 |
+| `proxy/providers/gemini_schema.rs` | 338 | Gemini schema |
+| `database/dao/settings.rs` | 327 | Settings DAO |
+| `database/dao/usage_rollup.rs` | 309 | 用量聚合 |
+| `proxy/providers/codex.rs` | 305 | Codex 处理 |
+| `commands/settings.rs` | 299 | Settings 命令 |
+| `proxy/providers/auth.rs` | 259 | 认证头 |
+| `database/dao/skills.rs` | 260 | Skills DAO |
+| `opencode_config.rs` | 233 | OpenCode 配置 |
+| `commands/usage.rs` | 244 | Usage 命令 |
+| `services/prompt.rs` | 242 | Prompt 服务 |
+| `services/env_manager.rs` | 240 | 环境检测 |
+| `provider_defaults.rs` | 238 | 50+ 预设 |
+| `services/config.rs` | 231 | 配置聚合 |
+| `services/webdav_auto_sync.rs` | 274 | 自动同步 |
+| `proxy/thinking_optimizer.rs` | 274 | 思考优化 |
+| `proxy/response_handler.rs` | 232 | 响应错误 |
+| `commands/copilot.rs` | 212 | Copilot 命令 |
+| `commands/mcp.rs` | 206 | MCP 命令 |
+| `panic_hook.rs` | 205 | panic 捕获 |
+| `services/speedtest.rs` | 187 | 测速 |
+| `services/model_fetch.rs` | 179 | 模型列表 |
+| `commands/import_export.rs` | 176 | 导入导出 |
+| `services/env_checker.rs` | 168 | 环境检查 |
+| `commands/failover.rs` | 171 | Failover 命令 |
+| `database/dao/failover.rs` | 146 | Failover DAO |
+| `commands/openclaw.rs` | 127 | OpenClaw 命令 |
+| `linux_fix.rs` | 121 | Linux 兼容 |
+| `init_status.rs` | 111 | 启动错误 |
+| `database/dao/mcp.rs` | 103 | MCP DAO |
+| `lightweight.rs` | 98 | 轻量模式 |
+| `commands/sync_support.rs` | 97 | 同步辅助 |
+| `deeplink/parser.rs` | - | URL 解析 |
+| `commands/deeplink.rs` | 89 | DeepLink 命令 |
+| `database/dao/prompts.rs` | 88 | Prompts DAO |
+| `commands/session_manager.rs` | 85 | 会话命令 |
+| `commands/omo.rs` | 73 | OMO 命令 |
+| `database/dao/stream_check.rs` | 74 | 流测 DAO |
+| `database/dao/universal_providers.rs` | 74 | Universal DAO |
+| `commands/prompt.rs` | 64 | Prompt 命令 |
+| `commands/mod.rs` | 64 | 模块导出 |
+| `proxy/log_codes.rs` | 62 | 日志代号 |
+| `proxy/mod.rs` | 57 | 代理导出 |
+| `commands/codex_oauth.rs` | 58 | Codex OAuth 命令 |
+| `commands/plugin.rs` | 48 | 插件命令 |
+| `prompt_files.rs` | 47 | Prompt 文件 |
+| `proxy/switch_lock.rs` | 42 | 切换锁 |
+| `services/mod.rs` | 37 | 服务导出 |
+| `main.rs` | 22 | 入口 |
+
+## 关键符号速查
+
+### 入口 / 生命周期
+
+- `main()` — `src-tauri/src/main.rs`
+- `run()` — `src-tauri/src/lib.rs`
+- `bootstrap()` — `src/main.tsx`
+- `App` — `src/App.tsx`
+
+### 原子写入
+
+- `atomic_write()` — `config.rs`
+- `write_json_file()` — `config.rs`
+- `write_codex_live_atomic()` — `codex_config.rs`
+- `write_gemini_live_atomic()` — `gemini_config.rs`
+
+### 代理核心
+
+- `ProxyServer::start()` — `proxy/server.rs`
+- `ProviderRouter::route_request()` — `proxy/provider_router.rs`
+- `CircuitBreaker::record_failure()` — `proxy/circuit_breaker.rs`
+- `FailoverSwitchManager::try_switch()` — `proxy/failover_switch.rs`
+- `SseStream` — `proxy/sse.rs`
+
+### 数据模型
+
+- `Provider` — `provider.rs`
+- `ProviderManager` — `provider.rs`
+- `MultiAppConfig` — `app_config.rs`
+- `AppType` — `app_config.rs`
+- `McpServer` / `McpApps` — `app_config.rs`
+- `InstalledSkill` / `SkillApps` — `app_config.rs`
+
+### Deep Link
+
+- `parse_deeplink_url()` — `deeplink/parser.rs`
+- `import_provider_from_deeplink()` — `deeplink/provider.rs`
+- `DeepLinkImportRequest` — `deeplink/mod.rs`

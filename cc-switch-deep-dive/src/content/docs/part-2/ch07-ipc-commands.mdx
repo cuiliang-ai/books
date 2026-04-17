@@ -1,0 +1,214 @@
+---
+title: "第 7 章：IPC 通信与 Commands 层"
+description: "200+ 命令的组织与类型契约"
+sidebar:
+  order: 4
+---
+
+## Tauri IPC 模型
+
+Tauri 2 的 IPC 有两种方向：
+
+1. **前端 → 后端：`invoke`** — 调用 `#[tauri::command]` 函数
+2. **后端 → 前端：`emit` / `listen`** — 事件订阅模式
+
+cc-switch 两种都大量使用。
+
+## Command 注册
+
+所有命令在 `lib.rs` 的 `invoke_handler` 里注册：
+
+```rust
+tauri::Builder::default()
+    .invoke_handler(tauri::generate_handler![
+        // Provider
+        commands::provider::list_providers,
+        commands::provider::add_provider,
+        commands::provider::update_provider,
+        commands::provider::switch_provider,
+        // Proxy
+        commands::proxy::get_proxy_config,
+        commands::proxy::update_proxy_config,
+        commands::proxy::toggle_proxy,
+        // MCP
+        commands::mcp::list_mcp_servers,
+        // ... 约 200 个命令
+    ])
+```
+
+## Commands 目录划分
+
+`src-tauri/src/commands/` 按业务域划分成 30 个子模块：
+
+| 子模块 | 命令数（近似） | 核心职责 |
+|--------|----------------|---------|
+| `provider.rs` | 8 | Provider CRUD + 切换 |
+| `proxy.rs` | 10+ | 代理生命周期 + 配置 |
+| `mcp.rs` | 6 | MCP CRUD |
+| `skill.rs` | 10+ | Skills 管理 |
+| `prompt.rs` | 4 | Prompt CRUD |
+| `settings.rs` | 8 | 设置读写 |
+| `session_manager.rs` | 4 | 会话浏览 |
+| `usage.rs` | 6 | 用量查询 |
+| `config.rs` | 8 | 直接读写 live 配置（调试用） |
+| `misc.rs` | 20+ | 杂项（最大的一个文件，1,518 行） |
+| `deeplink.rs` | 2 | Deep Link 导入 |
+| `failover.rs` | 4 | Failover 队列管理 |
+| `webdav_sync.rs` | 6 | WebDAV 同步 |
+| `copilot.rs` | 5 | GitHub Copilot 订阅 |
+| `codex_oauth.rs` | 2 | Codex OAuth 登录 |
+| `openclaw.rs` | 4 | OpenClaw 特殊命令 |
+| `workspace.rs` | 6 | 工作区文件 |
+| ... | | |
+
+## 命令签名约定
+
+一个典型的 Tauri 2 命令：
+
+```rust
+#[tauri::command]
+pub async fn switch_provider(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    provider_id: String,
+) -> Result<SwitchResult, AppError> {
+    let db = state.db.clone();
+    let result = services::config::switch_provider(
+        &db, &app_id, &provider_id
+    ).await?;
+
+    // 发事件通知前端
+    app.emit("provider-switched", ProviderSwitchEvent {
+        app_id: app_id.clone(),
+        provider_id: result.provider_id.clone(),
+        provider_name: result.provider_name.clone(),
+    })?;
+
+    // 更新托盘
+    tray::update_tray_menu(&app, &db).await?;
+
+    Ok(result)
+}
+```
+
+**关键约定**：
+1. 返回 `Result<T, AppError>` — AppError 实现 `Serialize`，前端能读到错误消息
+2. 参数采用 camelCase（Tauri 自动转换 `appId` ↔ `app_id`）
+3. `AppHandle` 注入用于事件/托盘
+4. `State` 注入用于共享资源（DB、代理状态等）
+
+## 类型契约：camelCase 双向转换
+
+Tauri 默认把 Rust 的 `snake_case` 转换为 JS 的 `camelCase`（参数和返回值都转）。所以：
+
+```rust
+// Rust
+pub struct Provider {
+    pub id: String,
+    pub website_url: Option<String>,
+}
+```
+
+```typescript
+// TypeScript
+interface Provider {
+  id: string;
+  websiteUrl?: string;
+}
+```
+
+对于**需要原名**的字段（如 Provider 的 settings_config 对应外部 JSON），用 `#[serde(rename = "...")]`：
+
+```rust
+#[serde(rename = "settingsConfig")]
+pub settings_config: Value,
+```
+
+## 事件通道
+
+后端发事件：
+
+```rust
+app_handle.emit("provider-switched", payload)?;
+```
+
+前端监听：
+
+```typescript
+import { listen } from "@tauri-apps/api/event";
+
+const unlisten = await listen<ProviderSwitchEvent>(
+  "provider-switched",
+  (evt) => { /* evt.payload */ }
+);
+// unlisten() 取消订阅
+```
+
+cc-switch 使用的主要事件：
+
+| 事件 | payload | 触发者 |
+|------|---------|-------|
+| `provider-switched` | `{appId, providerId, providerName, trigger}` | 切换完成 |
+| `proxy-status-changed` | `{running, port}` | 代理启动/停止 |
+| `configLoadError` | `{path, error}` | 启动失败 |
+| `env-conflict-detected` | `EnvConflict[]` | 环境变量冲突 |
+| `update-available` | `{version, notes}` | Updater |
+| `deeplink-received` | `{url}` | DeepLink |
+| `skill-sync-progress` | `{progress, total}` | Skill 同步 |
+
+## 错误类型：AppError
+
+`src-tauri/src/error.rs` 定义统一错误：
+
+```rust
+#[derive(thiserror::Error, Debug)]
+pub enum AppError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("Database error: {0}")]
+    Db(String),
+
+    #[error("Provider not found: {0}")]
+    ProviderNotFound(String),
+
+    #[error("{0}")]
+    Custom(String),
+    // ...
+}
+
+// 让 Tauri 能序列化它
+impl serde::Serialize for AppError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        serializer.serialize_str(self.to_string().as_ref())
+    }
+}
+```
+
+## 大文件解析：commands/misc.rs
+
+这个文件 1,518 行，包含不方便归类的命令：
+- 系统信息
+- 打开外部链接
+- 重置到默认值
+- 导出配置
+- 剪贴板操作
+- 权限检查
+- ...
+
+**反模式提醒**：`misc.rs` 本质上是"技术债垃圾桶"。如果你要贡献代码，尽量把新命令放到合适的子模块而不是塞进 misc。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/src/lib.rs` | `invoke_handler!` 宏注册 |
+| `src-tauri/src/commands/mod.rs` | 模块 re-export |
+| `src-tauri/src/error.rs` | `AppError` |
+| `src/lib/api/` | 前端 IPC 封装 |
+| `src/types/*.ts` | 前后端类型对应 |

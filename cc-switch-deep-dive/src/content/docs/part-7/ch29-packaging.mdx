@@ -1,0 +1,178 @@
+---
+title: "第 29 章：打包发布与自动更新"
+description: "Tauri 2 bundling + updater + 多平台分发"
+sidebar:
+  order: 3
+---
+
+## 打包体系
+
+Tauri 2 支持的包格式：
+
+| 平台 | 格式 | cc-switch 是否启用 |
+|------|------|---|
+| macOS | `.app`, `.dmg` | ✅ |
+| Windows | `.msi` (Wix), `.exe` (NSIS) | ✅ |
+| Linux | `.AppImage`, `.deb`, `.rpm`, Flatpak | ✅（Flatpak 目录单独维护） |
+
+### tauri.conf.json
+
+```json
+{
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "nsis", "msi", "deb", "appimage", "rpm"],
+    "identifier": "ai.cc-switch.app",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": ["resources/**/*"]
+  }
+}
+```
+
+### 体积优化
+
+`src-tauri/Cargo.toml`:
+
+```toml
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"    # optimize for size
+panic = "unwind"   # 保留 backtrace 给 panic hook
+strip = "symbols"
+```
+
+这些设置让 release 二进制更小，但仍保留 panic 捕获能力（对崩溃报告重要）。
+
+### Flatpak
+
+`flatpak/` 目录单独维护 Flatpak 清单。Flatpak 需要：
+
+- 元数据（`flatpak/ai.cc-switch.app.yml`）
+- 权限（文件系统、网络、dbus）
+- 构建脚本
+
+## 自动更新
+
+Tauri 2 `updater` 插件使用**签名的清单文件**：
+
+```json
+{
+  "version": "3.13.0",
+  "notes": "...",
+  "pub_date": "2026-04-10T...",
+  "platforms": {
+    "darwin-x86_64": {
+      "signature": "...",
+      "url": "https://.../cc-switch_3.13.0_x64.app.tar.gz"
+    },
+    "windows-x86_64": { ... },
+    "linux-x86_64": { ... }
+  }
+}
+```
+
+### 签名机制
+
+```
+$ tauri signer generate -w ~/.tauri/myapp.key
+```
+
+生成公私钥对。私钥签名构建产物，公钥嵌入 app bundle。更新时验证签名。
+
+`tauri.conf.json`：
+
+```json
+{
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://update-server.cc-switch.ai/{{target}}/{{current_version}}"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ..."
+    }
+  }
+}
+```
+
+### 更新流程
+
+1. 启动 + 每日检查 endpoint
+2. 比较 `current_version` < `latest`
+3. 在 `UpdateBadge` 组件里显示徽章
+4. 用户点"更新" → 下载 → 验证签名 → 重启 + 应用
+
+代码：
+
+```typescript
+// src/contexts/UpdateContext.tsx
+import { check } from '@tauri-apps/plugin-updater';
+
+const update = await check();
+if (update) {
+  await update.downloadAndInstall();
+  await relaunch();
+}
+```
+
+## CI/CD
+
+`scripts/` 目录含：
+- 版本号同步（`package.json` ↔ `Cargo.toml` ↔ `tauri.conf.json`）
+- Changelog 生成
+- Tag 触发 GitHub Actions 构建
+
+典型 workflow：
+
+```yaml
+matrix:
+  os: [macos-latest, ubuntu-latest, windows-latest]
+steps:
+  - name: Build & Bundle
+    run: pnpm tauri build
+  - name: Sign & Upload
+    # 对各平台产物签名
+    # 上传到 Release
+```
+
+## 单实例 + Deep Link
+
+`tauri_plugin_single_instance` 保证：
+- 第二次启动时参数转发给第一个实例
+- Deep Link 点击时应用不会重复打开
+
+这对 `ccswitch://` 协议至关重要。
+
+## 开机自启
+
+`auto_launch.rs` 封装 `auto-launch` crate：
+
+```rust
+pub fn set_auto_launch(enabled: bool) -> Result<()> {
+    let auto = AutoLaunchBuilder::new()
+        .set_app_name("CC Switch")
+        .set_app_path(current_exe().to_string_lossy())
+        .set_use_launch_agent(true)  // macOS
+        .build()?;
+
+    if enabled { auto.enable()? } else { auto.disable()? };
+    Ok(())
+}
+```
+
+macOS 用 LaunchAgent plist；Windows 用注册表；Linux 用 `.desktop` in `autostart/`。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/tauri.conf.json` | 打包配置 |
+| `src-tauri/Cargo.toml` | release profile |
+| `src-tauri/src/auto_launch.rs` | 开机自启 |
+| `flatpak/` | Flatpak 清单 |
+| `scripts/` | 构建脚本 |
+| `src/contexts/UpdateContext.tsx` | 更新检查 |
+| `src/components/UpdateBadge.tsx` | 更新 UI |

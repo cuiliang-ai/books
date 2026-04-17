@@ -1,0 +1,152 @@
+---
+title: "第 28 章：国际化与主题"
+description: "i18next + Tailwind dark mode"
+sidebar:
+  order: 2
+---
+
+## 国际化
+
+cc-switch 支持：中文（简体）、英文、日语。
+
+### i18next 配置
+
+```typescript
+// src/i18n/index.ts
+import i18n from 'i18next';
+import { initReactI18next } from 'react-i18next';
+import en from './en.json';
+import zhCN from './zh-CN.json';
+import ja from './ja.json';
+
+i18n
+  .use(initReactI18next)
+  .init({
+    resources: { en: { translation: en }, 'zh-CN': { translation: zhCN }, ja: { translation: ja } },
+    lng: getSavedLanguage() || navigator.language,
+    fallbackLng: 'en',
+    interpolation: { escapeValue: false },
+  });
+```
+
+### 使用
+
+```tsx
+const { t } = useTranslation();
+<button>{t("providers.addNew")}</button>
+<Trans
+  i18nKey="welcome.hero"
+  values={{ name: "Alice" }}
+  components={[<strong key="0" />]}
+/>
+```
+
+### 后端 i18n
+
+Rust 侧的一些字符串（如系统对话框）也需要 i18n。cc-switch 用一个轻量方案：
+
+```rust
+// settings.rs 记录用户语言
+pub fn current_language() -> String;
+
+// 错误消息：后端给 key，前端翻译
+AppError::Custom { key: "errors.providerNotFound", args: vec![id] }
+```
+
+前端在显示错误时 `t(err.key, err.args)`。
+
+## 主题
+
+### 三种模式
+
+```typescript
+type Theme = 'light' | 'dark' | 'system';
+```
+
+`ThemeProvider` 监听 OS 主题变化并应用 Tailwind 的 `dark` class：
+
+```tsx
+// theme-provider.tsx
+useEffect(() => {
+  const applyTheme = () => {
+    const isDark = theme === 'dark' ||
+      (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.classList.toggle('dark', isDark);
+  };
+  applyTheme();
+
+  if (theme === 'system') {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', applyTheme);
+    return () => mq.removeEventListener('change', applyTheme);
+  }
+}, [theme]);
+```
+
+### Tailwind Dark Mode
+
+`tailwind.config.cjs`:
+
+```javascript
+module.exports = {
+  darkMode: 'class',
+  content: ["./src/**/*.{ts,tsx}"],
+  theme: {
+    extend: {
+      colors: {
+        // CSS variables for shadcn/ui
+        background: 'hsl(var(--background))',
+        foreground: 'hsl(var(--foreground))',
+        // ...
+      }
+    }
+  }
+};
+```
+
+`src/index.css`:
+
+```css
+@layer base {
+  :root { --background: 0 0% 100%; --foreground: 222 47% 11%; ... }
+  .dark { --background: 222 47% 11%; --foreground: 210 40% 98%; ... }
+}
+```
+
+### 系统集成
+
+macOS: 窗口标题栏颜色跟随：
+
+```rust
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSColor;
+
+fn apply_window_theme(window: &Window, is_dark: bool) {
+    // 设置 NSWindow.titlebarAppearsTransparent 等属性
+}
+```
+
+Windows: Mica / Dark Title Bar 通过 tauri-plugin-window 等扩展支持。
+
+## 图标与品牌色
+
+Provider 图标用 `@lobehub/icons-static-svg`，支持 dark/light 自动切换（通过 CSS filter 或 SVG 内的 `currentColor`）。
+
+## 拓展语言
+
+添加新语言：
+1. 复制 `en.json` 为 `de.json` 翻译
+2. 在 `i18n/index.ts` resources 中注册
+3. 在 `LanguageSettings.tsx` 的下拉里增加选项
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src/i18n/index.ts` | i18next 初始化 |
+| `src/i18n/{en,zh-CN,ja}.json` | 翻译字典 |
+| `src/components/theme-provider.tsx` | 主题切换逻辑 |
+| `src/components/settings/ThemeSettings.tsx` | 主题 UI |
+| `src/components/settings/LanguageSettings.tsx` | 语言 UI |
+| `tailwind.config.cjs` | dark mode 配置 |
+| `src/index.css` | CSS 变量 |

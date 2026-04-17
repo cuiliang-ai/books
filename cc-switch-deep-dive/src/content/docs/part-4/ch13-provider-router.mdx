@@ -1,0 +1,160 @@
+---
+title: "第 13 章：Provider Router 与转发链路"
+description: "请求如何选上游、如何转发、如何回流"
+sidebar:
+  order: 2
+---
+
+## ProviderRouter 的职责
+
+`proxy/provider_router.rs:512 行`。核心职责：
+
+1. 读取当前 App 的 Provider 列表 + Failover 队列
+2. 按优先级遍历，跳过熔断 Open 的
+3. 选出一个可用 Provider
+4. 调用对应协议的 forward 函数
+5. 根据响应更新熔断器状态
+
+```rust
+pub struct ProviderRouter {
+    db: Arc<Database>,
+    breakers: Arc<RwLock<HashMap<String, CircuitBreaker>>>,  // provider_id → breaker
+}
+
+impl ProviderRouter {
+    pub async fn route_request(
+        &self,
+        app_type: &str,
+        req: IncomingRequest,
+    ) -> Result<OutgoingResponse, ProxyError> {
+        let candidates = self.select_candidates(app_type).await?;
+
+        for provider in candidates {
+            let breaker = self.get_or_create_breaker(&provider.id).await;
+
+            if breaker.state() == CircuitState::Open {
+                continue;  // 跳过
+            }
+
+            match self.forward(&provider, &req).await {
+                Ok(resp) => {
+                    breaker.record_success().await;
+                    return Ok(resp);
+                }
+                Err(e) if is_retriable(&e) => {
+                    breaker.record_failure().await;
+                    continue;  // 试下一个
+                }
+                Err(e) => return Err(e),  // 不可重试，直接返回
+            }
+        }
+        Err(ProxyError::AllProvidersFailed)
+    }
+}
+```
+
+## 候选 Provider 选择
+
+```
+selected = current_provider + failover_queue_providers
+```
+
+- `current_provider` 是用户当前选中的（UI 上高亮的那个）
+- `failover_queue_providers` 是用户标记了 `inFailoverQueue=true` 的其他 Provider
+- 按优先级顺序排队
+
+这种设计让用户能**显式控制**哪些 Provider 参与 Failover，而不是所有 Provider 都自动参与。
+
+## 转发到上游的链路
+
+```
+IncomingRequest (来自 CLI)
+  ↓
+body_filter        ← 过滤敏感字段
+  ↓
+model_mapper       ← 映射模型名（如 claude-3-opus → opus-4）
+  ↓
+thinking_rectifier ← 矫正 extended thinking 参数
+  ↓
+cache_injector     ← 注入缓存控制字段
+  ↓
+providers::{claude|codex|gemini}::transform_request
+  ↓
+hyper_client 发送到上游
+  ↓
+providers::{...}::streaming → SSE 解析
+  ↓
+response_processor
+  ↓
+usage::calculator  ← 计算 tokens/成本
+  ↓
+OutgoingResponse (返回给 CLI)
+```
+
+## 协议适配：Claude ↔ OpenAI
+
+`proxy/providers/claude.rs` (1,313 行) 和 `proxy/providers/transform.rs` (1,193 行) 共同处理：
+
+```rust
+// CLI 发来 Claude Messages API 格式
+{
+    "model": "claude-opus-4",
+    "messages": [...],
+    "system": "...",
+    "tools": [...],
+    "thinking": { "type": "enabled", "budget_tokens": 10000 }
+}
+
+// 转换为上游的 OpenAI Chat Completions 格式（如果 Provider 是 OpenAI 兼容的）
+{
+    "model": "gpt-4-turbo",
+    "messages": [
+        { "role": "system", "content": "..." },
+        ...
+    ],
+    "tools": [...]
+    // thinking 字段被丢弃或映射到其他参数
+}
+```
+
+## Gemini 特殊性：thoughtSignature
+
+Gemini 的"思考"返回会带一个 `thoughtSignature`，后续请求必须回放它。cc-switch 用 `GeminiShadowStore` 记录这种状态：
+
+```rust
+pub struct GeminiShadowStore {
+    signatures: RwLock<HashMap<SessionId, ThoughtSignature>>,
+}
+```
+
+这实质上是**为无状态的 Gemini API 贴了一层有状态代理**。
+
+## Switch Lock
+
+当用户点击切换时，可能正好有请求在进行中。`switch_lock.rs` 用一个 `tokio::sync::Mutex` 保证：**切换期间不分发新请求，且已分发的请求继续用旧 Provider 处理完**。
+
+```rust
+pub struct SwitchLock {
+    inner: Arc<Mutex<()>>,
+}
+
+impl SwitchLock {
+    pub async fn with_switch<F, Fut, T>(&self, f: F) -> T
+    where F: FnOnce() -> Fut, Fut: Future<Output = T>,
+    {
+        let _guard = self.inner.lock().await;
+        f().await
+    }
+}
+```
+
+## 本章速查表
+
+| 文件 | 行数 |
+|------|------|
+| `proxy/provider_router.rs` | 512 |
+| `proxy/forwarder.rs` | - |
+| `proxy/switch_lock.rs` | 42 |
+| `proxy/handlers.rs` | - |
+| `proxy/session.rs` | 636 |
+| `proxy/providers/transform.rs` | 1,193 |

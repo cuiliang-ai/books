@@ -1,0 +1,194 @@
+---
+title: "第 1 章：产品定位与设计目标"
+description: "为什么 AI CLI 生态需要一个统一管理器？"
+sidebar:
+  order: 1
+---
+
+## 你正在看什么
+
+一个开发者打开 terminal，在 Claude Code 里跑一个重构任务；切到另一个窗口，用 Codex CLI 生成 SQL；再打开 Gemini CLI 做一次视觉分析。三个工具，三套配置文件散落在 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.gemini/settings.json`。一个 API Key 过期，三处要改；想切换供应商，三处又要改；想让同一个 MCP 服务器在三个工具里都生效，得手抄三遍。
+
+这是 2024-2026 年 AI 编码工具爆发后每个重度用户的共同痛点。**cc-switch** 就是为了解决这个痛点而生的。
+
+`package.json` 的 `description` 字段写着这个项目的自我定义：
+
+```
+"All-in-One Assistant for Claude Code, Codex & Gemini CLI"
+```
+
+它并不只是"切换配置"——这种功能用一段 shell 脚本就能做。cc-switch 真正做的事是**把多个异构 AI CLI 工具的配置、MCP、Skills、会话、用量、代理**抽象到一个统一的数据模型里，用一个桌面应用进行可视化管理，同时保证**所有 live 配置文件的写入都是原子的、可回滚的、可同步的**。
+
+## 它是什么，不是什么
+
+先说**不是**什么：
+
+- 它**不是** IDE 插件。它是一个独立的桌面应用，只负责管理 CLI 工具的配置，不参与编辑代码。
+- 它**不是** AI 代理的替代品。用户仍然使用 Claude Code / Codex / Gemini CLI 本身，cc-switch 只是"控制塔"。
+- 它**不是** API Gateway 服务。虽然它内置本地代理（见第 12 章），但目的是为了 Failover 和统计，不是对外暴露 API。
+
+那**是**什么？
+
+**cc-switch 是一个用 Tauri 2 构建的跨平台桌面控制中心**，目标用户是同时使用多个 AI 编码 CLI 的开发者。核心能力：
+
+| 能力维度 | 关键特性 |
+|---------|---------|
+| **Provider 管理** | 50+ 内置预设、一键切换、可视化编辑 |
+| **配置同步** | 单一数据源 (SSOT) + 原子写入 |
+| **MCP 管理** | 跨 4 个 CLI 的双向同步面板 |
+| **Skills 管理** | 统一面板 + 仓库导入 + 应用分发 |
+| **本地代理** | 热切换 + 熔断器 + Auto Failover |
+| **会话管理** | 跨 6 种 CLI 的统一会话浏览器 |
+| **用量追踪** | 按 Provider / 模型 / 时间范围统计成本 |
+| **云同步** | WebDAV / Dropbox / OneDrive / iCloud |
+| **Deep Link** | `ccswitch://` 协议一键导入 |
+
+## 支持的五个 AI CLI
+
+cc-switch 面向的不只是 Claude Code，它从 v2 开始就走向了"All-in-One"定位。截至 v3.13.0：
+
+| CLI | 配置目录 | 配置格式 | 是否支持 MCP |
+|-----|---------|---------|------------|
+| **Claude Code** | `~/.claude/` | `settings.json` | ✅ |
+| **Codex** | `~/.codex/` | `config.toml` + `auth.json` | ✅ |
+| **Gemini CLI** | `~/.gemini/` | `settings.json` | ✅ |
+| **OpenCode** | `~/.config/opencode/` | JSON | ✅ |
+| **OpenClaw** | `~/.openclaw/` | JSON | ❌ |
+
+这种异构性直接塑造了 cc-switch 的**内部抽象**：
+
+```rust
+// src-tauri/src/app_config.rs
+pub enum AppType {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    OpenClaw,
+}
+
+pub struct McpApps {
+    pub claude: bool,
+    pub codex: bool,
+    pub gemini: bool,
+    pub opencode: bool,
+    // OpenClaw 不支持 MCP
+}
+```
+
+这个 `McpApps` 结构体是整个 MCP 同步机制的基石——每个 MCP 服务器只存储一份，但带有一组"启用标志"决定应该同步到哪些 CLI（详见第 19 章）。
+
+## 六个核心设计决策
+
+### 决策一：桌面应用，不是 CLI
+
+最直接的选择其实是做一个 CLI 工具。但 cc-switch 选择了桌面应用，理由在三个方面：
+
+1. **可视化优先** — Provider 卡片、图标、健康状态指示器比 CLI 输出直观得多
+2. **托盘快速切换** — 用户可以在不打开应用的情况下从托盘菜单完成切换
+3. **拖拽排序 / Icon Picker** — 这些交互在 CLI 里做成本太高
+
+代价是体积和内存开销更大，但 Tauri 2 把这个代价压到了可接受的范围（见决策二）。
+
+### 决策二：Tauri 2，不是 Electron
+
+`Cargo.toml` 开头就定义了这个选择：
+
+```toml
+[package]
+name = "cc-switch"
+edition = "2021"
+rust-version = "1.85.0"
+
+[dependencies]
+tauri = { version = "2.8.2", features = ["tray-icon", "protocol-asset", "image-png"] }
+```
+
+Tauri 2 与 Electron 的对比（在 cc-switch 场景下）：
+
+| 维度 | Tauri 2 | Electron |
+|------|---------|----------|
+| 包体 | ~10-20 MB | ~100+ MB |
+| 内存 | 用户系统 WebView | 打包 Chromium |
+| 启动 | 更快 | 较慢 |
+| 语言 | Rust 后端 | Node.js 后端 |
+| 系统集成 | tray / deep-link / auto-launch 原生 | 需额外库 |
+
+对一个"小工具"定位的应用来说，Tauri 的取舍更合理。
+
+### 决策三：SSOT（Single Source of Truth）
+
+cc-switch 内部维护的 `~/.cc-switch/config.json` 是**唯一数据源**，CLI 的 live 配置（如 `~/.claude/settings.json`）是这个源的**投射结果**。
+
+这个设计的好处：
+- **撤销无痕** — 切换失败可以直接从 SSOT 重新投射
+- **同步友好** — 只需同步 `~/.cc-switch/` 一个目录就能在多设备复现
+- **双向导入** — 用户已有的 live 配置可以被反向导入到 SSOT
+
+代价是**数据漂移**的风险——用户如果手动改了 live 文件，cc-switch 在下次切换时会覆盖掉。第 10 章会详细讨论这个权衡。
+
+### 决策四：原子写入
+
+所有 live 文件的写入都通过 `temp + rename` 模式：
+
+```rust
+// src-tauri/src/config.rs（简化）
+pub fn atomic_write(path: &Path, content: &str) -> Result<(), AppError> {
+    let parent = path.parent().ok_or(...)?;
+    let tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.persist(path)?;  // 原子 rename
+    Ok(())
+}
+```
+
+**任何崩溃、断电、进程被杀都不会产生损坏的配置文件**。这是 cc-switch 与"配置切换脚本"的本质区别。第 10 章会深入剖析。
+
+### 决策五：本地代理，不是仅改配置
+
+早期版本的 cc-switch 只负责写配置文件。v3 引入了**本地代理服务器**（`src-tauri/src/proxy/`，~7K 行 Rust）：
+
+```
+┌────────────┐       ┌─────────────┐       ┌──────────┐
+│ Claude CLI │──────▶│ cc-switch   │──────▶│ Provider │
+│            │       │ local proxy │       │  (OpenAI)│
+└────────────┘       └─────────────┘       └──────────┘
+                       │ 熔断器
+                       │ Failover
+                       │ 用量统计
+                       │ Thinking 矫正
+```
+
+这样做的价值：
+- **热切换** — 不用重启 CLI，代理切换上游就能生效
+- **Failover** — 供应商挂了自动切换到下一个
+- **用量统计** — 所有请求都经过代理，可以精确记账
+- **协议兼容** — Claude 的 Messages API ↔ OpenAI Chat Completions API 转换
+
+第 12-18 章会完整剖析这个代理层。
+
+### 决策六：Deep Link 作为协作协议
+
+`ccswitch://` 是 cc-switch 与外部世界（博客、Provider 官方、Skills 市场）的契约：
+
+```
+ccswitch://v1/import?resource=provider&app=claude&name=NewAI&endpoint=https://...&apiKey=sk-...
+```
+
+这使得：
+- Provider 官方可以在自己的文档里放一个"一键配置 cc-switch"按钮
+- Skills 社区可以分发 `ccswitch://v1/import?resource=skill&...` 链接
+- 用户可以把自己的 Provider 预设生成 URL 分享给同事
+
+第 22 章详解这个协议。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `package.json` | 项目元数据、依赖列表 |
+| `src-tauri/Cargo.toml` | Rust 后端依赖（Tauri 2.8, Axum, hyper, rusqlite） |
+| `src-tauri/src/app_config.rs` | AppType / McpApps / MultiAppConfig |
+| `src-tauri/src/provider.rs` | Provider 数据模型 |
+| `src-tauri/src/config.rs` | atomic_write + home_dir 处理 |
+| `README_ZH.md` | 产品定位中文文档 |

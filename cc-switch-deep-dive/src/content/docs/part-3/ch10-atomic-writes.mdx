@@ -1,0 +1,161 @@
+---
+title: "第 10 章：原子写入与配置安全"
+description: "temp + rename 模式如何防止配置损坏"
+sidebar:
+  order: 3
+---
+
+## 为什么需要原子写入
+
+设想一个普通的文件覆写：
+
+```rust
+// 反例：非原子
+let mut file = File::create(path)?;  // 立即截断原文件
+file.write_all(new_content)?;        // 崩溃/断电 → 原文件已被截断，新内容未写入
+```
+
+**结果**：配置文件变成空文件或半截文件。用户的 Claude Code 启动时解析失败。
+
+对 cc-switch 这种"一切切换都要写配置"的应用，这是**不可接受**的。
+
+## 原子写入的原理
+
+POSIX 和 Windows NTFS 都保证 **`rename`/`move` 操作是原子的**（针对同一卷）：
+
+```rust
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), AppError> {
+    let parent = path.parent().ok_or(...)?;
+
+    // 1. 在同一目录创建临时文件
+    let tmp = NamedTempFile::new_in(parent)?;
+
+    // 2. 写入全部内容
+    tmp.as_file().write_all(content)?;
+
+    // 3. fsync（强制落盘）
+    tmp.as_file().sync_all()?;
+
+    // 4. 原子 rename（persist）
+    tmp.persist(path)?;
+
+    Ok(())
+}
+```
+
+四步保证：
+- **同一目录** — rename 跨卷会退化为 copy，不再原子
+- **写完 fsync** — 避免 rename 后内容仍在 page cache
+- **persist** — `tempfile` crate 的 rename 封装
+
+## cc-switch 的实际实现
+
+`src-tauri/src/config.rs`:
+
+```rust
+pub fn atomic_write(path: &Path, content: &str) -> Result<(), AppError> {
+    // 1. 自动创建父目录
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // 2. 备份旧文件（如果存在）
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path)?;
+    }
+
+    // 3. 原子写入
+    let tmp = tempfile::NamedTempFile::new_in(
+        path.parent().unwrap_or_else(|| Path::new("."))
+    )?;
+    tmp.as_file().write_all(content.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path)?;
+
+    Ok(())
+}
+```
+
+**额外保护**：写入前先备份到 `.bak`。即使原子写入过程中出现罕见异常（文件系统损坏），用户也有一份回退。
+
+## JSON 的双重保护
+
+对 JSON 文件，cc-switch 再加一层：**写入前验证可解析**。
+
+```rust
+pub fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), AppError> {
+    let content = serde_json::to_string_pretty(value)?;
+
+    // 自我验证：写什么就能读回什么
+    let _: Value = serde_json::from_str(&content)?;
+
+    atomic_write(path, &content)
+}
+```
+
+## TOML 的保留式编辑
+
+Codex 用 TOML。如果用 `toml` crate 的全量序列化，会丢失用户的注释和格式。cc-switch 用 `toml_edit`：
+
+```rust
+let mut doc: DocumentMut = existing_content.parse()?;
+doc["profile"]["default"]["model"] = toml_edit::value("gpt-4");
+// doc.to_string() 保留原始格式 + 注释
+atomic_write(path, &doc.to_string())?;
+```
+
+## Database 事务也是原子
+
+SQLite 本身的 WAL 模式 + transaction 就是原子的：
+
+```rust
+let tx = conn.transaction()?;
+tx.execute(...)?;
+tx.execute(...)?;
+tx.commit()?;  // 原子提交
+```
+
+任何中途失败，整个事务回滚。cc-switch 的 DAO 层普遍使用事务。
+
+## 启动时的"配置损坏"处理
+
+如果用户手动毁坏了 `~/.cc-switch/config.json`（罕见但真实），启动会失败。此时：
+
+```rust
+// lib.rs::setup
+match load_multi_app_config() {
+    Ok(cfg) => cfg,
+    Err(e) => {
+        init_status::set_error(&e, &path);
+        app.emit("configLoadError", ...)?;
+        // 不 panic，让前端决定
+    }
+}
+```
+
+前端（`main.tsx`）收到事件 → 弹 dialog → 提示用户从 `.bak` 恢复 → `exit(1)`。
+
+## 反模式："直接写 live 文件"
+
+对比 cc-switch 早期版本或类似工具：
+
+```rust
+// ❌ 反模式
+std::fs::write(live_path, content)?;  // 非原子，可能损坏
+```
+
+cc-switch 的每一处 live 文件写入**都**通过 atomic_write，包括：
+- `write_codex_live_atomic`
+- `write_gemini_live_atomic`
+- `write_claude_live_atomic`（通过 `atomic_write` + `write_json_file`）
+
+## 本章速查表
+
+| 文件 | 关键函数 |
+|------|---------|
+| `src-tauri/src/config.rs` | `atomic_write`, `write_json_file`, `write_text_file` |
+| `src-tauri/src/codex_config.rs` | `write_codex_live_atomic` |
+| `src-tauri/src/gemini_config.rs` | `write_gemini_live_atomic` |
+| `src-tauri/Cargo.toml` | `tempfile = "3"` |
+| `src-tauri/src/database/mod.rs` | SQLite 事务封装 |

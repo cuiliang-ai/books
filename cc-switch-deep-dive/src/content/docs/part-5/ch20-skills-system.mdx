@@ -1,0 +1,149 @@
+---
+title: "第 20 章：Skills 系统与 SSOT"
+description: "Skill 的 SSOT 迁移与跨 App 分发"
+sidebar:
+  order: 2
+---
+
+## 什么是 Skill
+
+Claude Code 2025 年引入的 Skill 是一种**程序化知识**，以 SKILL.md 为核心的文件包：
+
+```
+skills/git-workflow/
+├── SKILL.md            # 元数据 + 说明
+├── scripts/
+│   └── commit.sh
+└── references/
+    └── conventional-commits.md
+```
+
+Skill 被 Claude Code 按**渐进式披露**加载：Tier 1 (标题 + 描述) 总是可见，Tier 2-3 按需加载。
+
+## cc-switch 的管理职责
+
+cc-switch 不运行 Skill（那是 CLI 的事），但负责：
+
+1. **仓库管理** — 用户可订阅多个 Skill 仓库（Git 或本地目录）
+2. **安装** — 把选中的 Skill 复制到 CLI 的 skills 目录
+3. **分发** — 同一个 Skill 可以安装到多个 CLI
+4. **更新** — 仓库同步时增量更新
+5. **编辑** — 可视化编辑 SKILL.md 前言
+
+## SSOT 模型
+
+```rust
+// src-tauri/src/app_config.rs
+pub struct InstalledSkill {
+    pub id: String,             // uuid
+    pub name: String,           // SKILL.md 的 name
+    pub source: SkillSource,    // 来源仓库
+    pub apps: SkillApps,        // 已安装到哪些 app
+    pub version: Option<String>,
+    pub notes: Option<String>,
+}
+
+pub struct SkillApps {
+    pub claude: bool,
+    pub codex: bool,
+    pub gemini: bool,
+    pub opencode: bool,
+    pub openclaw: bool,  // OpenClaw 支持 Skills！
+}
+```
+
+## services/skill.rs — 2,957 行的核心
+
+这是整个 Rust 后端**行数最多的单文件**，包含：
+
+- `SkillStore` — SSOT 的内存表示
+- 仓库 clone / pull（用 `reqwest` 下载 zip，不依赖 git）
+- Skill 解析（frontmatter + body）
+- 多 App 分发
+- 冲突检测
+- 迁移函数（`migrate_skills_to_ssot`）
+
+## 仓库订阅
+
+用户在 `RepoManagerPanel` 里添加仓库：
+
+```json
+{
+  "type": "github",
+  "url": "https://github.com/xxx/skills-collection",
+  "branch": "main",
+  "subdir": "skills/"
+}
+```
+
+后端通过 GitHub API 拉取 zip（不需要 git binary）：
+
+```rust
+async fn fetch_github_zip(repo: &str, branch: &str) -> Result<Bytes, AppError> {
+    let url = format!("https://github.com/{repo}/archive/refs/heads/{branch}.zip");
+    reqwest::get(&url).await?.bytes().await
+}
+```
+
+解压后扫描 SKILL.md 文件，构建 Skill 列表。
+
+## 安装到 App
+
+每个 CLI 的 Skills 目录不同：
+
+| CLI | Skills 目录 |
+|-----|-----------|
+| Claude | `~/.claude/skills/` 或 `~/.config/claude/skills/` |
+| Codex | 类似 |
+| OpenClaw | `~/.openclaw/skills/` |
+
+安装 = 把 Skill 目录**复制**（不是软链接，因为跨平台 / Windows NTFS 权限）。
+
+## 迁移：旧布局 → SSOT
+
+早期 cc-switch 不是 SSOT，Skills 直接装到 live 目录。v3 迁移：
+
+```rust
+pub async fn migrate_skills_to_ssot(
+    db: &Database,
+) -> Result<MigrationResult, AppError> {
+    // 1. 扫描所有 CLI 的 live skills 目录
+    // 2. 按 name + content hash 去重
+    // 3. 复制到 SSOT 目录 (~/.cc-switch/skills/)
+    // 4. 设置 apps 标志
+    // 5. 不删除 live 原文件（用户可手动清理）
+}
+```
+
+**保守迁移**：不破坏用户已有状态，允许回滚。
+
+## Skills 的 UI
+
+```
+src/components/skills/
+├── SkillsPage.tsx           # Skill 浏览器
+├── UnifiedSkillsPanel.tsx   # 已安装 Skills 列表
+├── SkillCard.tsx            # 单个 Skill 卡片
+├── RepoManager.tsx          # 仓库管理
+└── RepoManagerPanel.tsx     # 仓库面板
+```
+
+## 与 WebDAV 同步
+
+Skills 的 SSOT 目录（`~/.cc-switch/skills/`）会被 WebDAV 同步模块包含，实现**多设备 Skills 一致性**（第 26 章）。
+
+## Deep Link 导入 Skill
+
+```
+ccswitch://v1/import?resource=skill&name=react-refactor&source=https://github.com/...&apps=claude,codex
+```
+
+## 本章速查表
+
+| 文件 | 行数 |
+|------|------|
+| `src-tauri/src/services/skill.rs` | 2,957 |
+| `src-tauri/src/commands/skill.rs` | 341 |
+| `src-tauri/src/database/dao/skills.rs` | 260 |
+| `src-tauri/src/mcp/skill.rs` | - (Skills 解析) |
+| `src/components/skills/` | 多个组件 |

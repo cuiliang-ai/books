@@ -1,0 +1,218 @@
+---
+title: "第 3 章：十分钟心智模型"
+description: "一张总图理解 cc-switch"
+sidebar:
+  order: 3
+---
+
+## 一张图记住 cc-switch
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    用户桌面 (macOS / Windows / Linux)          │
+│                                                                │
+│   ┌──────────────────┐           ┌──────────────────┐          │
+│   │  cc-switch UI    │           │    系统托盘      │          │
+│   │ (React 18 WebView)│◀──────────▶│  快速切换菜单   │          │
+│   └────────┬─────────┘           └────────┬─────────┘          │
+│            │                              │                    │
+│            │ IPC (invoke)                 │ MenuItem click     │
+│            │                              │                    │
+│   ┌────────▼──────────────────────────────▼─────────┐          │
+│   │          Rust 后端 (Tauri 2)                    │          │
+│   │                                                 │          │
+│   │   Commands  →  Services  →  Database (SQLite)   │          │
+│   │                    │                            │          │
+│   │                    ▼                            │          │
+│   │   ┌─────────────────────────────────────────┐   │          │
+│   │   │  SSOT: ~/.cc-switch/config.json         │   │          │
+│   │   │  + ~/.cc-switch/cc-switch.db            │   │          │
+│   │   └───────────────┬─────────────────────────┘   │          │
+│   │                   │ atomic_write (temp + rename)│          │
+│   │                   ▼                             │          │
+│   │   ┌─────────────────────────────────────────┐   │          │
+│   │   │  Live 配置文件:                         │   │          │
+│   │   │  ~/.claude/settings.json                │   │          │
+│   │   │  ~/.codex/config.toml + auth.json       │   │          │
+│   │   │  ~/.gemini/settings.json                │   │          │
+│   │   │  ~/.config/opencode/...                 │   │          │
+│   │   │  ~/.openclaw/...                        │   │          │
+│   │   └─────────────────────────────────────────┘   │          │
+│   │                                                 │          │
+│   │   ┌─────────────────────────────────────────┐   │          │
+│   │   │  本地代理 (可选，127.0.0.1:PORT)        │   │          │
+│   │   │   Axum + Hyper + rustls                 │   │          │
+│   │   │   ├─ Provider Router                    │   │          │
+│   │   │   ├─ Circuit Breaker                    │   │          │
+│   │   │   ├─ Failover Switch                    │   │          │
+│   │   │   └─ SSE 流式转发                       │   │          │
+│   │   └─────────────────────┬───────────────────┘   │          │
+│   └─────────────────────────┼───────────────────────┘          │
+│                             │                                  │
+│         ┌───────────────────┼───────────────────┐              │
+│         │                   │                   │              │
+│     ┌───▼──┐            ┌───▼──┐            ┌───▼──┐           │
+│     │Claude│            │Codex │            │Gemini│           │
+│     │ CLI  │            │ CLI  │            │ CLI  │           │
+│     └──────┘            └──────┘            └──────┘           │
+└────────────────────────────────────────────────────────────────┘
+                             │  HTTPS
+                             ▼
+                    ┌────────────────┐
+                    │ LLM Provider   │
+                    │ OpenAI/Anthropic│
+                    │ Google/DeepSeek │
+                    │ ...            │
+                    └────────────────┘
+```
+
+## 三种典型流程
+
+### 流程 A：切换 Provider（不开代理）
+
+```
+用户点击 Provider 卡片
+  → 前端 invoke("switch_provider", {appId, providerId})
+  → commands::provider::switch_provider (commands/provider.rs)
+  → services::ConfigService::switch_provider
+  → 读 SSOT 中的 Provider.settings_config
+  → 调用 atomic_write 覆写 live 配置
+      (如 ~/.claude/settings.json)
+  → 更新 SSOT 的 current = providerId
+  → 发 "provider-switched" 事件
+  → 前端 TanStack Query 失效缓存
+  → UI 重新渲染，托盘菜单更新
+```
+
+### 流程 B：切换 Provider（开代理）
+
+```
+用户点击 Provider 卡片（代理模式）
+  → 前端 invoke("switch_provider_proxy", {...})
+  → commands::proxy::switch_provider_proxy
+  → ProxyState::current_providers 更新（内存 + DB）
+  → 旧请求正在进行？用 switch_lock 保证切换的原子性
+  → 不需要改 live 配置（CLI 指向 127.0.0.1:PORT，不变）
+  → 下一个请求到达时，ProviderRouter::select_provider 选出新 Provider
+```
+
+**关键差异**：代理模式下切换是**纯内存操作**，速度快、无文件写入；非代理模式要改 live 文件，CLI 需要重启才生效（某些 CLI 会热读）。
+
+### 流程 C：代理模式下的请求 + Failover
+
+```
+Claude CLI 发送请求到 127.0.0.1:PORT/v1/messages
+  → ProxyServer 手写 hyper accept loop 接收
+  → 保留原始 header casing 到 HeaderCaseMap
+  → handlers::route_request (proxy/handlers.rs)
+  → ProviderRouter::select_provider
+     ├─ 检查熔断器状态 (Closed/Open/HalfOpen)
+     ├─ Open → 跳过此 Provider，选下一个
+     └─ Closed/HalfOpen → 选中
+  → providers::claude::forward_request
+     ├─ SSE 流式转发
+     ├─ 写入 Usage 统计
+     └─ 若响应错误 → CircuitBreaker::record_failure
+  → 连续失败达阈值 → 打开熔断器 + 触发 FailoverSwitchManager::try_switch
+  → 自动切到下一个 Provider
+  → 前端收到 "provider-switched" 事件，UI 同步
+```
+
+## 数据模型全景
+
+```
+MultiAppConfig (~/.cc-switch/config.json)
+├── claude: ProviderManager
+│   ├── providers: IndexMap<id, Provider>
+│   └── current: "id-xyz"
+├── codex: ProviderManager
+├── gemini: ProviderManager
+├── opencode: ProviderManager
+└── openclaw: ProviderManager
+
+Provider {
+  id, name,
+  settings_config,  // 对应 CLI 的 settings.json 内容
+  icon, icon_color,
+  category, notes,
+  in_failover_queue,
+  meta: ProviderMeta {
+    apiKey (隔离存储),
+    endpoints (多 endpoint 支持),
+    ...
+  }
+}
+
+SQLite (~/.cc-switch/cc-switch.db)
+├── providers          (热数据 + 索引)
+├── universal_providers (通用 Provider)
+├── mcp_servers
+├── skills
+├── prompts
+├── proxy_config
+├── failover_config
+├── settings
+├── usage_rollup      (用量聚合)
+└── stream_check_logs
+```
+
+## 关键概念对照表
+
+| 术语 | 含义 | 源码位置 |
+|------|------|---------|
+| **SSOT** | Single Source of Truth，唯一数据源 | `provider.rs` + `~/.cc-switch/config.json` |
+| **Live 配置** | CLI 实际读取的配置 | `~/.claude/settings.json` 等 |
+| **App (appId)** | 5 种支持的 CLI 之一 | `app_config.rs::AppType` |
+| **Provider** | API 供应商预设 | `provider.rs::Provider` |
+| **MultiAppConfig** | 跨 App 的总配置 | `app_config.rs::MultiAppConfig` |
+| **Atomic Write** | 临时文件 + rename | `config.rs::atomic_write` |
+| **Proxy** | 本地 HTTP 代理 | `proxy/server.rs::ProxyServer` |
+| **ProviderRouter** | 代理路由层 | `proxy/provider_router.rs` |
+| **Circuit Breaker** | 熔断器 | `proxy/circuit_breaker.rs` |
+| **Failover Switch** | 自动切换管理器 | `proxy/failover_switch.rs` |
+| **Deep Link** | `ccswitch://` URL | `deeplink/parser.rs` |
+| **SSOT skill** | Skills 单一数据源 | `services/skill.rs::SkillStore` |
+| **Session** | CLI 的对话记录 | `session_manager/` |
+| **Universal Provider** | 不绑定 CLI 的通用 Provider | `components/universal/` |
+
+## 五个"第一次接触就困惑"的设计
+
+### 1. 为什么有 `~/.cc-switch/config.json` **又**有 `cc-switch.db`？
+
+SQLite 用于**热数据、查询、索引**；JSON 用于**备份、用户可读、简单数据**。设置项、Proxy 配置、用量聚合都在 SQLite；Provider 的主数据持久到 config.json（并在 DB 有缓存镜像）。见第 23 章。
+
+### 2. 为什么 OpenClaw 不支持 MCP？
+
+OpenClaw 的设计理念不同（类似 Agent SDK 而非 CLI），它有自己的工具系统。cc-switch 按这个事实裁剪 API：`McpApps.openclaw` 字段压根不存在（见第 1 章源码片段）。
+
+### 3. 为什么 Codex 的 Provider 文件命名是 `auth-{name}.json`？
+
+Codex 的 config.toml 里通过 `profile` 引用 auth 配置，profile 名对应独立的 auth 文件。cc-switch 为每个 Provider 生成带 sanitize 名字的 auth 文件。
+
+### 4. `Provider.inFailoverQueue` 为什么是布尔而不是列表？
+
+因为这是 Provider 的属性，不是队列的属性。`FailoverQueue` 是**所有被标记了 `inFailoverQueue=true` 的 Provider 按顺序排队**。见第 16 章。
+
+### 5. 代理为什么要 preserve header case？
+
+Claude CLI 对返回响应的 header casing 有检查（某些库做大小写敏感对比）。如果代理改了 casing，CLI 可能会失败。见第 12 章。
+
+## 推荐阅读顺序
+
+| 目标 | 章节顺序 |
+|------|---------|
+| **想用 cc-switch 开发类似项目** | 1 → 2 → 4 → 5 → 6 → 7 |
+| **想学 Tauri 2** | 4 → 7 → 27 → 29 |
+| **想学 Rust 异步网络代理** | 12 → 13 → 17 → 14 |
+| **想理解 Failover 机制** | 15 → 16 |
+| **想学 AI 工具链的工程化** | 8 → 9 → 10 → 19 → 20 → 22 |
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/src/app_config.rs` | AppType / MultiAppConfig |
+| `src-tauri/src/provider.rs` | Provider / ProviderManager |
+| `src-tauri/src/proxy/server.rs` | 代理服务器入口 |
+| `src-tauri/src/proxy/provider_router.rs` | 路由选择 |
+| `src-tauri/src/database/schema.rs` | 数据库表结构 |

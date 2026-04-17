@@ -1,0 +1,187 @@
+---
+title: "第 12 章：本地代理服务器架构"
+description: "Axum + Hyper 手写 accept loop 的工业级设计"
+sidebar:
+  order: 1
+---
+
+## 为什么要本地代理
+
+前面章节说过，早期 cc-switch 只改配置文件。v3 引入代理后，能力范围扩展到：
+
+1. **热切换** — CLI 指向 `127.0.0.1:PORT`，切 Provider 无需重启 CLI
+2. **Failover** — 主 Provider 挂了自动切备份
+3. **熔断** — 防止对不健康上游持续重试
+4. **用量统计** — 所有请求可统一记账
+5. **协议桥接** — Claude Messages API ↔ OpenAI Chat Completions 互转
+6. **思考预算矫正** — 适配不同 Provider 对 extended thinking 参数的解析
+
+## ProxyServer 结构
+
+`src-tauri/src/proxy/server.rs:57`:
+
+```rust
+#[derive(Clone)]
+pub struct ProxyState {
+    pub db: Arc<Database>,
+    pub config: Arc<RwLock<ProxyConfig>>,
+    pub status: Arc<RwLock<ProxyStatus>>,
+    pub start_time: Arc<RwLock<Option<std::time::Instant>>>,
+    pub current_providers: Arc<RwLock<HashMap<String, (String, String)>>>,
+    pub provider_router: Arc<ProviderRouter>,
+    pub gemini_shadow: Arc<GeminiShadowStore>,
+    pub app_handle: Option<tauri::AppHandle>,
+    pub failover_manager: Arc<FailoverSwitchManager>,
+}
+
+pub struct ProxyServer {
+    config: ProxyConfig,
+    state: ProxyState,
+    shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
+    server_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+}
+```
+
+**设计重点**：
+- `ProxyState` 用 `Arc` + `RwLock` 让所有请求处理器共享状态
+- `shutdown_tx` 通过 oneshot channel 发出优雅关闭信号
+- `provider_router` 持有熔断器状态，跨请求保持
+
+## 为什么是 Axum + Hyper 的混合
+
+**Axum 用于路由**（路由定义清晰、类型安全）：
+
+```rust
+let app = Router::new()
+    .route("/v1/messages", post(handlers::messages))
+    .route("/v1/chat/completions", post(handlers::chat_completions))
+    .route("/v1beta/models/:model:streamGenerateContent", post(handlers::gemini))
+    .route("/health", get(handlers::health))
+    .with_state(state.clone())
+    .layer(DefaultBodyLimit::max(100 * 1024 * 1024));
+```
+
+**Hyper 手写 accept loop 用于 preserve_header_case**：
+
+```rust
+// 简化示意
+let listener = TcpListener::bind(addr).await?;
+loop {
+    let (stream, _) = listener.accept().await?;
+    let io = TokioIo::new(stream);
+    let app = app.clone();
+    tokio::spawn(async move {
+        hyper::server::conn::http1::Builder::new()
+            .preserve_header_case(true)  // 关键！
+            .serve_connection(io, TowerToHyperService::new(app))
+            .await
+    });
+}
+```
+
+`preserve_header_case(true)` 让进入的请求 header **保留原始大小写**到 `HeaderCaseMap` extension。转发到上游时再按原样输出，**使请求看起来和 CLI 直连完全一致**。
+
+## 为什么要保留 header casing
+
+Claude CLI 内部使用的 HTTP 客户端库对响应 header 做**大小写敏感**的字符串比对。如果代理返回的 header 是"内容相同但大小写不同"的版本，CLI 会抛 "missing header X-Amzn-*" 等错误。
+
+Hyper 默认会把 header 归一化到小写（符合 HTTP/2 但不符合 HTTP/1.1 的保留原则）。这里手动关闭归一化，是**工业级细节**的体现。
+
+## 启动流程
+
+```rust
+impl ProxyServer {
+    pub async fn start(&self) -> Result<(), ProxyError> {
+        let port = find_available_port(...)?;
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let listener = TcpListener::bind(addr).await?;
+
+        let app = build_router(self.state.clone());
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            run_hyper_loop(listener, app, shutdown_rx).await;
+        });
+
+        // 保存 handle 和 shutdown_tx
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
+        *self.server_handle.write().await = Some(handle);
+
+        Ok(())
+    }
+
+    pub async fn stop(&self) -> Result<(), ProxyError> {
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.server_handle.write().await.take() {
+            handle.await.ok();  // 等实际关闭
+        }
+        Ok(())
+    }
+}
+```
+
+**优雅停止**：oneshot 通知 accept loop 停止，然后 `handle.await` 等待它真正结束。这保证停止后端口立刻可被重新使用。
+
+## 端口策略
+
+用户可以指定端口，也可以让 cc-switch 自动找空闲端口：
+
+```rust
+fn find_available_port(preferred: u16) -> Result<u16, io::Error> {
+    if preferred != 0 {
+        if let Ok(_) = TcpListener::bind(("127.0.0.1", preferred)) {
+            return Ok(preferred);
+        }
+    }
+    // 让 OS 分配
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
+}
+```
+
+## CLI 指向代理
+
+启用代理时，cc-switch 会把每个 App 的 live 配置里的 base URL 改为 `http://127.0.0.1:PORT`。这对用户**透明**——他们只看到 Provider 卡片和开关，实际 URL 改写在幕后。
+
+## 关键子模块
+
+| 模块 | 职责 |
+|------|------|
+| `server.rs` | 服务器启停 + 路由 |
+| `handlers.rs` | Axum 处理函数 |
+| `handler_config.rs` | 处理器运行时配置 |
+| `handler_context.rs` | 请求上下文 |
+| `provider_router.rs` | Provider 选择 + 熔断 |
+| `circuit_breaker.rs` | 三态熔断器 |
+| `failover_switch.rs` | 自动切换管理器 |
+| `forwarder.rs` | 请求转发 |
+| `hyper_client.rs` | 上游 HTTP 客户端 |
+| `http_client.rs` | 通用 HTTP 客户端 |
+| `sse.rs` | SSE 流式解析 |
+| `response_processor.rs` | 响应处理 (1,007 行) |
+| `response_handler.rs` | 响应错误/状态 |
+| `session.rs` | 请求 session 状态 |
+| `switch_lock.rs` | 切换原子性保障 |
+| `thinking_*.rs` | Thinking 预算矫正 |
+| `body_filter.rs` | Body 过滤器 |
+| `cache_injector.rs` | 缓存注入 |
+| `copilot_optimizer.rs` | GitHub Copilot 专项优化 |
+| `gemini_url.rs` | Gemini URL 构造 |
+| `error.rs` + `error_mapper.rs` | 错误类型 + 映射 |
+| `health.rs` | 健康检查 |
+| `log_codes.rs` | 日志代号常量 |
+| `model_mapper.rs` | 模型名映射 |
+| `providers/` | 5 个 Provider 适配器 |
+| `usage/` | 用量计算器 |
+
+接下来 6 章会逐一深入。
+
+## 本章速查表
+
+| 文件 | 关键符号 |
+|------|---------|
+| `proxy/server.rs` | `ProxyServer::new / start / stop`, `ProxyState` |
+| `proxy/mod.rs` | 模块导出 |
+| `proxy/types.rs` | `ProxyConfig`, `ProxyStatus`, `ProxyError` |

@@ -1,0 +1,159 @@
+---
+title: "第 4 章：Tauri 2 应用生命周期"
+description: "从 main.rs 到 RunEvent 的完整启动流程"
+sidebar:
+  order: 1
+---
+
+## 入口：main.rs
+
+`src-tauri/src/main.rs` 只有 22 行，是一个标准的 Tauri 2 thin entrypoint：
+
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    cc_switch_lib::run()
+}
+```
+
+`windows_subsystem = "windows"` 是 Windows 下避免控制台窗口弹出的关键属性——在 debug 模式下仍然保留控制台便于调试。
+
+真正的生命周期在 `lib.rs::run()`（1,719 行，应用生命周期的主脊柱）。
+
+## 生命周期时序
+
+```
+main()
+  │
+  ▼
+cc_switch_lib::run()
+  │
+  ├─ tauri::Builder::default()
+  │
+  ├─ .plugin(...)          ← 注册 Tauri 插件
+  │    ├─ tauri_plugin_log
+  │    ├─ tauri_plugin_single_instance
+  │    ├─ tauri_plugin_deep_link
+  │    ├─ tauri_plugin_updater
+  │    ├─ tauri_plugin_dialog
+  │    ├─ tauri_plugin_store
+  │    ├─ tauri_plugin_opener
+  │    └─ tauri_plugin_process
+  │
+  ├─ .manage(AppState)     ← 全局状态注入
+  │
+  ├─ .invoke_handler(...)  ← 200+ Command 注册
+  │
+  ├─ .setup(|app| { ... }) ← 应用启动钩子
+  │    │
+  │    ├─ 初始化 Database
+  │    ├─ 装载 MultiAppConfig
+  │    ├─ 初始化 Tray
+  │    ├─ 注册 DeepLink handler
+  │    ├─ 启动 Proxy（如启用）
+  │    ├─ 启动 WebDAV 自动同步
+  │    └─ 启动 Updater 检查
+  │
+  ├─ .on_window_event(...) ← 窗口事件
+  │
+  └─ .run(context)
+        │
+        ▼
+     RunEvent loop
+        ├─ RunEvent::Ready
+        ├─ RunEvent::ExitRequested (cleanup)
+        └─ RunEvent::Exit
+```
+
+## 初始化错误通道
+
+这是 cc-switch 一个很有特色的设计。`lib.rs` 和 `main.tsx` 协同：
+
+```rust
+// 后端：load 配置失败不 panic，而是发事件 + 记录错误状态
+app.emit("configLoadError", ConfigLoadErrorPayload { path, error })?;
+init_status::set_error(...);
+```
+
+```typescript
+// main.tsx：bootstrap 时主动查询
+const initError = await invoke("get_init_error");
+if (initError) {
+    await handleConfigLoadError(initError); // 显示 dialog + exit(1)
+}
+```
+
+这个"**事件+主动查询**"的组合解决了一个竞态：事件可能在前端订阅前就已发出。所以 `init_status.rs` 维护一个可持久读取的错误状态。
+
+## 插件 `single-instance`
+
+Windows/macOS/Linux 都只允许一个实例运行：
+
+```rust
+tauri_plugin_single_instance::init(|app, argv, cwd| {
+    // 第二次启动：把 argv 解析为 deep link
+    // 复用已有窗口
+})
+```
+
+第二次启动的参数会被传递给第一个实例——Deep Link 场景的关键（第 22 章）。
+
+## 托盘初始化
+
+`tray.rs` 的 `init_tray()` 在 setup 中被调用：
+
+```rust
+TrayIconBuilder::new()
+    .tooltip("CC Switch")
+    .icon(tray_icon)
+    .menu(&build_menu(...)?)
+    .on_menu_event(handle_menu_event)
+    .on_tray_icon_event(|tray, event| {
+        // 左键点击 → 显示窗口
+    })
+    .build(app)?;
+```
+
+托盘菜单是**动态构建**的：每次切换 Provider 后都会重建。第 27 章会详解。
+
+## 窗口事件
+
+cc-switch 支持"关闭时最小化到托盘"（可配置）：
+
+```rust
+.on_window_event(|window, event| match event {
+    WindowEvent::CloseRequested { api, .. } => {
+        if settings::close_to_tray() {
+            window.hide().unwrap();
+            api.prevent_close();  // 拦截关闭
+        }
+    }
+    _ => {}
+})
+```
+
+## 退出清理
+
+```rust
+.run(|_app_handle, event| match event {
+    RunEvent::ExitRequested { api, code, .. } => {
+        // 保存运行时状态
+        // 停止代理服务器
+        // flush 日志
+    }
+    _ => {}
+})
+```
+
+## 本章速查表
+
+| 文件 | 关键函数/行号 |
+|------|--------------|
+| `main.rs` | `main()` (22 行) |
+| `lib.rs` | `run()` (全文 1,719 行) |
+| `init_status.rs` | 初始化错误状态 |
+| `panic_hook.rs` | panic 捕获 + 上报 |
+| `linux_fix.rs` | Linux 特定兼容 |
+| `tray.rs` | 托盘初始化 |
+| `src/main.tsx` | 前端 bootstrap |

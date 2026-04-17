@@ -1,0 +1,172 @@
+---
+title: "第 24 章：Session Manager 跨工具会话"
+description: "6 种 CLI 的会话格式统一解析"
+sidebar:
+  order: 2
+---
+
+## 痛点
+
+每个 AI CLI 都有自己的会话存储：
+
+| CLI | 格式 | 位置 |
+|-----|------|-----|
+| Claude Code | JSONL | `~/.claude/projects/*/sessions/*.jsonl` |
+| Codex | JSONL + SQLite | `~/.codex/sessions/` |
+| Gemini CLI | JSON | `~/.gemini/sessions/` |
+| OpenCode | JSON | `~/.config/opencode/sessions/` |
+| OpenClaw | SQLite | `~/.openclaw/db/` |
+
+用户想"找到上周用 Claude 写 React 组件的那次对话" — 难。cc-switch 的 Session Manager 统一解析这些格式，提供一个跨 CLI 的会话浏览器。
+
+## 架构
+
+```
+src-tauri/src/session_manager/
+├── mod.rs            (282 行) - 统一接口
+└── providers/
+    ├── mod.rs        (6 行)
+    ├── claude.rs     (500 行)
+    ├── codex.rs      (400 行)
+    ├── gemini.rs     (252 行)
+    ├── opencode.rs   (997 行) - OpenCode 最复杂
+    ├── openclaw.rs   (476 行)
+    └── utils.rs      (177 行)
+```
+
+每个 provider 实现相同的接口：
+
+```rust
+pub trait SessionProvider {
+    async fn list_sessions(&self) -> Result<Vec<SessionMeta>>;
+    async fn load_session(&self, id: &str) -> Result<SessionContent>;
+    async fn search(&self, query: &str) -> Result<Vec<SessionMatch>>;
+}
+```
+
+## 统一数据模型
+
+```rust
+pub struct SessionMeta {
+    pub id: String,
+    pub app: AppType,
+    pub project: Option<String>,
+    pub title: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub message_count: u32,
+    pub model: Option<String>,
+    pub total_tokens: Option<u64>,
+    pub cost: Option<f64>,
+}
+
+pub struct SessionMessage {
+    pub role: Role,                    // User / Assistant / Tool / System
+    pub content: Vec<ContentBlock>,
+    pub timestamp: DateTime<Utc>,
+    pub tool_calls: Vec<ToolCall>,
+}
+```
+
+不管底层是 JSONL 还是 SQLite，前端看到的都是这个模型。
+
+## Claude Code: JSONL 解析
+
+```rust
+pub async fn list_claude_sessions() -> Result<Vec<SessionMeta>> {
+    let project_dir = get_claude_projects_dir();
+    let mut sessions = vec![];
+
+    for project in fs::read_dir(&project_dir)? {
+        let session_dir = project?.path().join("sessions");
+        for entry in fs::read_dir(&session_dir)? {
+            let path = entry?.path();
+            // 懒解析：只读第一行（session start）+ 最后一行（session end）
+            let meta = parse_session_meta_lazy(&path).await?;
+            sessions.push(meta);
+        }
+    }
+    Ok(sessions)
+}
+```
+
+**懒解析**关键：列表视图不读整个文件，只读头尾——JSONL 大可达 MB 级。
+
+## Full Load
+
+点开单个会话时才完整解析：
+
+```rust
+pub async fn load_claude_session(id: &str) -> Result<SessionContent> {
+    let path = find_session_path(id)?;
+    let file = tokio::fs::File::open(&path).await?;
+    let mut reader = BufReader::new(file).lines();
+    let mut messages = vec![];
+
+    while let Some(line) = reader.next_line().await? {
+        let entry: Value = serde_json::from_str(&line)?;
+        if let Some(msg) = parse_message(&entry) {
+            messages.push(msg);
+        }
+    }
+
+    Ok(SessionContent { messages, ... })
+}
+```
+
+## Codex: SQLite 扫描
+
+```rust
+let conn = rusqlite::Connection::open(&codex_db_path)?;
+let mut stmt = conn.prepare(
+    "SELECT id, title, started_at FROM sessions ORDER BY started_at DESC LIMIT 100"
+)?;
+```
+
+## OpenCode: 最复杂（997 行）
+
+OpenCode 的 session 格式最复杂：
+- 多文件（每个 session 分 manifest + parts）
+- 工具调用嵌套
+- 多模态内容 base64 存储
+
+这是 `opencode.rs` 接近 1K 行的原因。
+
+## 搜索
+
+`SessionMessageItem` 组件里有全文搜索：
+
+```typescript
+import FlexSearch from 'flexsearch';
+
+const index = new FlexSearch.Index({ tokenize: 'forward', cache: true });
+messages.forEach((m, i) => index.add(i, m.content_text));
+const results = index.search(query, { limit: 50 });
+```
+
+## 恢复到 CLI
+
+理论上可以把会话"恢复"到 CLI（把 messages 写回对应目录让 CLI 能继续）。当前版本以**浏览**为主，恢复功能按需扩展。
+
+## 前端
+
+```
+src/components/sessions/
+├── SessionManagerPage.tsx      # 主页面
+├── SessionItem.tsx             # 列表项
+├── SessionMessageItem.tsx      # 消息渲染
+├── SessionToc.tsx              # 目录导航
+└── utils.ts
+```
+
+## 本章速查表
+
+| 文件 | 行数 |
+|------|------|
+| `session_manager/mod.rs` | 282 |
+| `session_manager/providers/claude.rs` | 500 |
+| `session_manager/providers/opencode.rs` | 997 |
+| `services/session_usage.rs` | 639 |
+| `services/session_usage_codex.rs` | 813 |
+| `services/session_usage_gemini.rs` | 504 |
+| `commands/session_manager.rs` | 85 |

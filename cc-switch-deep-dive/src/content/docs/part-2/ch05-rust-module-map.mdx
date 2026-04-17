@@ -1,0 +1,166 @@
+---
+title: "第 5 章：Rust 后端模块地图"
+description: "34 个顶层模块的职责分工"
+sidebar:
+  order: 2
+---
+
+## 顶层模块一览
+
+`src-tauri/src/` 的模块声明（来自 `lib.rs` 顶部）：
+
+```rust
+mod app_config;        // AppType / MultiAppConfig / McpServer / SkillApps
+mod app_store;         // Tauri Store 封装
+mod auto_launch;       // 开机自启 (auto-launch crate 封装)
+mod claude_mcp;        // Claude 的 MCP 文件操作
+mod claude_plugin;     // Claude 自定义插件
+mod codex_config;      // Codex config.toml + auth.json 原子写入
+mod commands;          // 所有 IPC 命令（30 子模块）
+mod config;            // 文件 IO 基础（atomic_write / home_dir）
+mod database;          // SQLite DAO
+mod deeplink;          // ccswitch:// 协议
+mod error;             // AppError 统一错误类型
+mod gemini_config;     // Gemini settings.json
+mod gemini_mcp;        // Gemini MCP 操作
+mod init_status;       // 初始化错误状态
+mod lightweight;       // 轻量模式（最小资源占用）
+mod linux_fix;         // Linux 特定兼容
+mod mcp;               // MCP 解析 + 工具
+mod openclaw_config;   // OpenClaw 配置
+mod opencode_config;   // OpenCode 配置
+mod panic_hook;        // panic 捕获
+mod prompt;            // Prompt 最小封装
+mod prompt_files;      // Prompt 文件
+mod provider;          // Provider 核心模型
+mod provider_defaults; // 50+ Provider 预设
+mod proxy;             // 本地 HTTP 代理子系统
+mod services;          // 业务服务层
+mod session_manager;   // 跨工具会话
+mod settings;          // AppSettings（用户偏好）
+mod store;             // AppState（运行时全局状态）
+mod tray;              // 系统托盘
+mod usage_script;      // 用量查询 JS 脚本
+```
+
+## 按职责分组
+
+### Group 1：应用基础设施
+
+| 模块 | 职责 |
+|------|------|
+| `lib.rs` | 应用入口 / setup / RunEvent |
+| `error.rs` | `AppError` + `thiserror` |
+| `panic_hook.rs` | panic → 日志 + 对话框 |
+| `init_status.rs` | 启动失败状态持久化 |
+| `settings.rs` | 用户偏好配置（742 行） |
+| `store.rs` | AppState 薄封装 |
+| `app_store.rs` | Tauri Store 插件封装 |
+| `lightweight.rs` | 最小资源模式 |
+| `linux_fix.rs` | WebKit2GTK 兼容 |
+
+### Group 2：领域模型
+
+| 模块 | 职责 | 行数 |
+|------|------|------|
+| `app_config.rs` | AppType / MultiAppConfig | ~700 |
+| `provider.rs` | Provider / ProviderManager | 997 |
+| `provider_defaults.rs` | 50+ 预设 | 238 |
+
+### Group 3：配置写入（按 CLI 分裂）
+
+| 模块 | 目标 CLI | 核心函数 |
+|------|---------|---------|
+| `config.rs` | Claude + 通用 | `atomic_write`, `get_claude_*_path` |
+| `codex_config.rs` | Codex | `write_codex_live_atomic` |
+| `gemini_config.rs` | Gemini | `write_gemini_live_atomic` |
+| `openclaw_config.rs` | OpenClaw | 1,084 行（最复杂） |
+| `opencode_config.rs` | OpenCode | 233 行 |
+| `claude_mcp.rs` | Claude MCP | MCP 写入 |
+| `gemini_mcp.rs` | Gemini MCP | MCP 写入 |
+| `claude_plugin.rs` | Claude Plugins | 插件系统 |
+
+### Group 4：IPC 命令层
+
+`commands/` 目录下 30 个子模块（见第 7 章详解）：
+
+```
+auth.rs           balance.rs           codex_oauth.rs
+coding_plan.rs    config.rs            copilot.rs
+deeplink.rs       env.rs               failover.rs
+global_proxy.rs   import_export.rs     lightweight.rs
+mcp.rs            misc.rs (1,518 行!)  model_fetch.rs
+omo.rs            openclaw.rs          plugin.rs
+prompt.rs         provider.rs          proxy.rs
+session_manager.rs  settings.rs        skill.rs
+stream_check.rs   subscription.rs      sync_support.rs
+usage.rs          webdav_sync.rs       workspace.rs
+```
+
+### Group 5：业务服务层
+
+`services/`（15K+ 行）：
+
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `proxy.rs` | 2,819 | 代理服务管理 + 客户端 |
+| `skill.rs` | 2,957 | Skills SSOT 引擎 |
+| `usage_stats.rs` | 1,930 | 用量统计聚合 |
+| `stream_check.rs` | 1,836 | 流式连通性测试 |
+| `subscription.rs` | 1,309 | 订阅 Provider (Copilot 等) |
+| `session_usage*.rs` | 1,956 | 3 种 CLI 的用量解析 |
+| `webdav_sync.rs` | 884 | WebDAV 同步核心 |
+| `session_usage.rs` | 639 | Claude 会话用量 |
+| `omo.rs` | 560 | OpenAI-compat 相关 |
+| `webdav.rs` | 554 | WebDAV 底层 |
+| `coding_plan.rs` | 451 | Codex plans |
+| `balance.rs` | 411 | 余额查询 |
+| `mcp.rs` | 384 | MCP 服务 |
+| `webdav_auto_sync.rs` | 274 | 自动同步调度 |
+| `prompt.rs` | 242 | Prompt 服务 |
+| `env_manager.rs` | 240 | 环境变量检测 |
+| `config.rs` | 231 | 配置服务聚合 |
+| `speedtest.rs` | 187 | 测速 |
+| `model_fetch.rs` | 179 | 模型列表拉取 |
+| `env_checker.rs` | 168 | 环境检查 |
+
+### Group 6：代理子系统
+
+`proxy/`（见第 12-18 章详解）。
+
+### Group 7：数据库
+
+`database/`（见第 23 章）。
+
+### Group 8：独立子系统
+
+| 子系统 | 入口 |
+|--------|------|
+| `session_manager/` | `mod.rs` (282 行) + 6 个 provider |
+| `deeplink/` | `mod.rs` + parser/mcp/prompt/provider/skill |
+| `mcp/` | `mod.rs` + parser/provider/prompt/skill/utils |
+
+## 模块行数 Top 10
+
+| 排名 | 模块 | 行数 |
+|------|------|------|
+| 1 | `services/skill.rs` | 2,957 |
+| 2 | `services/proxy.rs` | 2,819 |
+| 3 | `proxy/providers/transform_gemini.rs` | 2,152 |
+| 4 | `services/usage_stats.rs` | 1,930 |
+| 5 | `services/stream_check.rs` | 1,836 |
+| 6 | `proxy/providers/copilot_auth.rs` | 1,820 |
+| 7 | `lib.rs` | 1,719 |
+| 8 | `commands/misc.rs` | 1,518 |
+| 9 | `proxy/providers/transform_responses.rs` | 1,329 |
+| 10 | `proxy/providers/claude.rs` | 1,313 |
+
+代理的 transform 层占了相当大的篇幅——这是因为不同 CLI 协议间的转换需要处理大量边界情况。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/src/lib.rs` (顶部) | 所有模块声明 |
+| `services/mod.rs` | 服务层 re-export |
+| `commands/mod.rs` | IPC 命令注册 |

@@ -1,0 +1,130 @@
+---
+title: "第 30 章：扩展实战与设计哲学"
+description: "如何为 cc-switch 贡献代码 + 整体设计哲学"
+sidebar:
+  order: 4
+---
+
+## 三个典型扩展任务
+
+### 任务 1：新增一个 Provider 预设
+
+最小改动：
+
+1. 编辑 `src-tauri/src/provider_defaults.rs`
+2. 添加一条 `ProviderTemplate`：
+
+```rust
+ProviderTemplate {
+    id: "new-provider",
+    name: "NewProvider",
+    website_url: "https://new-provider.com",
+    icon: "new-provider",         // 需在 @lobehub/icons-static-svg 中存在
+    icon_color: "#FF5733",
+    settings_template: json!({
+        "provider": { "base_url": "https://api.new-provider.com/v1" }
+    }),
+    category: Some("cloud"),
+}
+```
+
+3. 如果是"非常规"协议（不是 OpenAI 兼容），可能需要在 `proxy/providers/` 新增适配器。
+
+### 任务 2：新增一个 CLI 工具支持
+
+假设加 `vscode-chat-cli`：
+
+1. `src-tauri/src/app_config.rs`：新增 `AppType::VsCodeChat`
+2. `src-tauri/src/vscode_chat_config.rs`：实现路径 + 原子写入
+3. `src-tauri/src/session_manager/providers/vscode.rs`：会话解析
+4. 前端 `src/components/AppSwitcher.tsx`：添加 tab
+5. 更新 i18n 翻译
+6. 数据库迁移（`providers` 表加上 `vscode_chat` 的约束）
+
+### 任务 3：新增一个代理后端（如支持 Cerebras）
+
+1. `src-tauri/src/proxy/providers/cerebras.rs`：实现 `Adapter` trait
+2. 在 `proxy/provider_router.rs` 的 `forward` 分支里添加
+3. 如果协议与 OpenAI 兼容，大部分可复用 `transform.rs`
+
+## 测试
+
+```bash
+# Rust 单测
+cargo test --manifest-path src-tauri/Cargo.toml
+
+# 前端单测
+pnpm test:unit
+
+# 集成 (Tauri 开发模式)
+pnpm dev
+```
+
+## 设计哲学总结
+
+cc-switch 的设计映射了几个一以贯之的原则：
+
+### 1. SSOT 是有代价的选择
+
+集中数据源带来的好处是：一次编辑多处生效、跨设备同步容易。代价是：用户手动改 live 文件会被覆盖。
+
+cc-switch 选择了这个代价，并用"导入已有配置"功能缓解。这是**权衡，不是最优**——在不同场景下另一个选择也合理。
+
+### 2. 原子性是工程的底色
+
+- 配置文件 → atomic_write
+- 数据库 → transaction
+- 代理切换 → switch_lock
+- Failover → pending_switches HashSet 去重
+
+系统的每一层都有"这一步要么完成要么没发生"的设计。这比"大部分情况下工作得好"强一万倍。
+
+### 3. 异构抽象到数据模型
+
+5 种 CLI 配置格式不同，但对用户来说只是 `AppType` 枚举 + `settings_config: Value`。异构性下沉到 `codex_config.rs` / `gemini_config.rs` 等 leaf 模块，中上层无感知。
+
+### 4. 代理是力量乘数
+
+单纯改配置只是"切换"。加上代理后解锁了 Failover / 统计 / 矫正 / 协议桥接。这个选择让 cc-switch 从"配置管理器"升级为"AI 编码工作台"。
+
+### 5. 用户可见 = 用户可控
+
+Provider 卡片的图标 / 颜色、托盘菜单、Deep Link 分享——所有"用户能看见"的东西都是"用户能修改"的。这让 cc-switch 像一个私人工具而不是封闭产品。
+
+### 6. 工程细节决定上限
+
+保留 header casing、thinking budget 矫正、Gemini thoughtSignature 回放、Codex 多 Provider 独立备份文件——这些是"用过才知道"的细节。cc-switch 的价值很大一部分来自对这些细节的不妥协。
+
+## 与同类工具对比
+
+| 工具 | 定位 | 对比 |
+|------|------|------|
+| **cc-switch** | AI CLI 统一管理桌面应用 | 全栈：GUI + 代理 + 数据 |
+| config-switch shell 脚本 | 简单 rename 脚本 | 原子性、Failover 均缺失 |
+| LiteLLM Proxy | 本地 AI 代理 | 纯服务端，无 GUI；无配置管理 |
+| Open WebUI | AI 聊天界面 | 不管配置；面向终端用户 |
+| AI Gateway（企业） | 多租户网关 | 重量级；不为个人开发者 |
+
+## 值得学习的代码片段
+
+**最精彩的 10 个模块**（个人观点）：
+
+1. `proxy/server.rs` — hyper accept loop 的工业级写法
+2. `proxy/circuit_breaker.rs` — 简洁的三态机
+3. `proxy/failover_switch.rs` — 去重 + 事件的协作
+4. `proxy/providers/streaming.rs` — SSE 事件流合成
+5. `config.rs::atomic_write` — 原子写入的教科书实现
+6. `codex_config.rs` — TOML 保留式编辑
+7. `services/skill.rs` — 2957 行的 Skills 引擎（规模美学）
+8. `deeplink/parser.rs` — URL 到领域模型的映射
+9. `database/dao/usage_rollup.rs` — SQLite 聚合的优雅
+10. `session_manager/providers/opencode.rs` — 复杂格式的拆解
+
+## 本章速查表
+
+| 主题 | 建议阅读 |
+|------|---------|
+| 贡献指南 | `CONTRIBUTING.md` |
+| 代码风格 | `prettier` + `rustfmt` |
+| 测试规范 | `src-tauri/tests/` + `src/**/*.test.tsx` |
+| 许可 | `LICENSE` (MIT) |

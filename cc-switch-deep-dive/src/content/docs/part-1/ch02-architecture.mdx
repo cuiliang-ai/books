@@ -1,0 +1,190 @@
+---
+title: "第 2 章：技术选型与架构全景"
+description: "Tauri 2 + React 18 + Rust — 技术栈的取舍与模块组织"
+sidebar:
+  order: 2
+---
+
+## 宏观架构
+
+cc-switch 是一个典型的 **Tauri 应用**：Rust 后端 + Web 前端，通过 IPC（Command / Event）连接。
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                   用户 (Desktop UI)                       │
+└────────────────────┬──────────────────────────────────────┘
+                     │  WebView (系统浏览器引擎)
+┌────────────────────▼──────────────────────────────────────┐
+│   React 18 前端 (src/)                                    │
+│   • App.tsx + AppSwitcher                                 │
+│   • components/ (~30 业务目录, shadcn/ui)                 │
+│   • lib/query (TanStack Query v5)                         │
+│   • hooks/ + i18n/                                        │
+└────────────────────┬──────────────────────────────────────┘
+                     │  IPC (invoke / listen)
+┌────────────────────▼──────────────────────────────────────┐
+│   Rust 后端 (src-tauri/src/)                              │
+│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐       │
+│   │  commands/  │  │  services/  │  │  proxy/     │       │
+│   │ (IPC 入口)  │  │ (业务服务)  │  │ (HTTP代理)  │       │
+│   └──────┬──────┘  └──────┬──────┘  └──────┬──────┘       │
+│          │                │                │              │
+│   ┌──────▼────────────────▼────────────────▼──────┐       │
+│   │  database/ (SQLite DAO)                       │       │
+│   └───────────────────┬───────────────────────────┘       │
+│                       │                                   │
+│   ┌───────────────────▼───────────────────────────┐       │
+│   │  文件系统 (~/.cc-switch/, ~/.claude/, ...)    │       │
+│   └───────────────────────────────────────────────┘       │
+└────────────────────────┬──────────────────────────────────┘
+                         │ HTTPS + SSE
+                         ▼
+                   ┌─────────────┐
+                   │ LLM Provider│
+                   │ (OpenAI/.. )│
+                   └─────────────┘
+```
+
+## 前端技术栈
+
+`package.json` 的 dependencies 透露了前端的核心选择：
+
+| 依赖 | 用途 | 选择理由 |
+|------|------|---------|
+| `react@18` | UI 框架 | 成熟，TanStack Query 生态 |
+| `@tauri-apps/api` | IPC 桥 | Tauri 官方 SDK |
+| `@tanstack/react-query@5` | 服务端状态 | 缓存 + 乐观更新 + 失效 |
+| `@tanstack/react-virtual` | 虚拟列表 | 长 Provider 列表性能 |
+| `@radix-ui/react-*` | 无头组件 | 可访问性 + 键盘导航 |
+| `tailwindcss@3` | 样式 | 一致性 + 暗色模式 |
+| `lucide-react` | 图标 | 轻量、一致 |
+| `i18next` + `react-i18next` | 国际化 | 中/英/日支持 |
+| `react-hook-form` + `zod@4` | 表单 | 类型安全校验 |
+| `@dnd-kit/*` | 拖拽 | Provider 排序 |
+| `codemirror@6` | 代码编辑 | MCP/Skill 编辑器 |
+| `framer-motion` | 动画 | 面板切换过渡 |
+| `sonner` | Toast 通知 | 轻量 |
+| `cmdk` | 命令面板 | 快速跳转 |
+| `recharts` | 图表 | 用量趋势图 |
+| `flexsearch` | 前端全文搜索 | Provider 搜索 |
+| `@lobehub/icons-static-svg` | AI 品牌图标 | Provider 图标 |
+
+这是一套非常"现代"的 React 技术栈：**Headless 组件 + 原子 CSS + 类型安全表单 + 查询缓存**。shadcn/ui 的痕迹无处不在（`components/ui/` 目录）。
+
+## 后端技术栈
+
+`src-tauri/Cargo.toml` 展示了 Rust 侧的选择：
+
+| Crate | 用途 |
+|-------|------|
+| `tauri@2.8.2` | 应用框架 |
+| `tokio@1` | 异步运行时 |
+| `axum@0.7` + `tower` | HTTP 路由 (代理服务器) |
+| `hyper@1` + `hyper-util` | 手写 HTTP/1.1 accept loop |
+| `hyper-rustls` + `rustls@0.23` | TLS |
+| `reqwest@0.12` | 外部 HTTP 客户端 |
+| `rusqlite@0.31` (bundled) | SQLite，包含 backup/hooks |
+| `serde` + `serde_json` + `toml_edit` | 序列化 |
+| `rquickjs@0.8` | 内嵌 JavaScript 引擎（用量脚本） |
+| `regex` + `json5` + `json-five` | 配置容错解析 |
+| `tempfile` | 原子写入 |
+| `arboard` | 剪贴板 |
+| `auto-launch@0.5` | 开机启动 |
+| `uuid@1.11` | Provider ID |
+| `sha2@0.10` | 哈希 |
+| `zip@2` + `flate2` + `brotli` | 归档和压缩 |
+| `url@2.5` | URL 解析 (deeplink) |
+
+Tauri 2 插件：`log`、`opener`、`process`、`updater`、`dialog`、`store`、`deep-link`、`single-instance`。
+
+### 注意两处不寻常的选择
+
+1. **手写 hyper 而不是全部用 Axum** — `preserve_header_case(true)` 需要直接操作 hyper 的底层 API，因为 CLI 对 header casing 敏感。详见第 12 章。
+2. **rquickjs 内嵌 JS** — 用于执行用户配置的"用量查询脚本"。每个 Provider 的余额 API 格式各不相同，用 JS 脚本处理是最灵活的方案。见第 25 章。
+
+## 目录布局的组织原则
+
+### 前端按"功能域"组织
+
+```
+src/components/
+├── providers/        # Provider 管理域
+├── mcp/              # MCP 域
+├── skills/           # Skills 域
+├── prompts/          # Prompts 域
+├── proxy/            # 代理/Failover 域
+├── sessions/         # 会话管理域
+├── settings/         # 设置域
+├── usage/            # 用量域
+├── workspace/        # 工作区文件域
+├── universal/        # 通用 Provider
+├── agents/           # Claude Agents
+├── openclaw/         # OpenClaw 特殊域
+├── env/              # 环境冲突检测
+├── deeplink/         # Deep Link 导入 UI
+└── ui/               # shadcn/ui 基础组件
+```
+
+每个域**独立自治**：自己的组件、hooks、utils。这种组织方式的好处是添加新功能（比如"新增一个 OpenClaw 面板"）只需新建一个目录，不会污染其他域。
+
+### 后端按"层次"组织
+
+```
+src-tauri/src/
+├── lib.rs            # 应用入口 / setup
+├── commands/         # L1: IPC 边界层（Tauri 命令）
+├── services/         # L2: 业务服务层
+├── database/         # L3: 持久化层
+├── proxy/            # 独立子系统：HTTP 代理
+├── session_manager/  # 独立子系统：跨工具会话
+├── deeplink/         # 独立子系统：URL 协议
+├── mcp/              # 独立子系统：MCP 解析
+├── provider.rs       # 领域模型
+├── app_config.rs     # 领域模型
+└── ...               # 单文件配置解析（codex_config、gemini_config 等）
+```
+
+注意这里是**混合架构**：主流程走 `commands → services → database` 三层，但几个"重头戏"（proxy、session_manager、mcp）是独立子系统，直接被 commands 调用。
+
+## 模块依赖图（简化）
+
+```
+   commands/  ─────┐
+        │          │
+        ▼          ▼
+   services/   proxy/
+        │      │  │
+        ▼      ▼  ▼
+    database/ (rusqlite)
+        │
+        ▼
+    文件系统 (~/.cc-switch, ~/.claude, ...)
+```
+
+循环依赖的防火墙：
+- `services/` 不依赖 `commands/`
+- `database/dao` 不依赖 `services/`
+- `proxy/` 只依赖 `database/` 和公共工具
+
+这种边界让每一层都**可单元测试**。实际上 `src-tauri/tests/` 和 `database/tests.rs` 有相当多的单测。
+
+## 三种并发模型同时存在
+
+cc-switch 后端涉及三种并发模型：
+
+1. **Tauri 的 async command** — `#[tauri::command] async fn foo()`，在 Tauri 的 executor 上跑
+2. **Tokio 独立 runtime** — 代理服务器有自己的 `spawn` 任务
+3. **同步阻塞 + spawn_blocking** — 文件 IO 和 rusqlite 本质是同步的，通过 `tokio::task::spawn_blocking` 桥接
+
+第 27 章会详细讨论线程模型。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `package.json` | 前端依赖列表 |
+| `src-tauri/Cargo.toml` | 后端依赖列表 |
+| `src-tauri/src/lib.rs` | 应用入口 |
+| `components.json` | shadcn/ui 配置 |
+| `vite.config.ts` | 前端构建 |
+| `tsconfig.json` | TypeScript 路径别名 `@/*` |

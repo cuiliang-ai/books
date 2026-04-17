@@ -1,0 +1,154 @@
+---
+title: "第 8 章：Provider 数据模型"
+description: "SSOT 设计与 Provider / ProviderMeta 结构"
+sidebar:
+  order: 1
+---
+
+## Provider 核心结构
+
+`src-tauri/src/provider.rs` 的 `Provider` 结构体是整个系统的"原子单位"：
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Provider {
+    pub id: String,
+    pub name: String,
+
+    #[serde(rename = "settingsConfig")]
+    pub settings_config: Value,          // 对应 CLI 的 settings 内容
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "websiteUrl")]
+    pub website_url: Option<String>,
+
+    pub category: Option<String>,
+    pub created_at: Option<i64>,
+    pub sort_index: Option<usize>,
+    pub notes: Option<String>,
+
+    pub meta: Option<ProviderMeta>,      // 元数据（API Key、endpoints 等）
+
+    pub icon: Option<String>,            // 图标名 (lobe-icons)
+    pub icon_color: Option<String>,      // 自定义颜色
+
+    #[serde(default)]
+    #[serde(rename = "inFailoverQueue")]
+    pub in_failover_queue: bool,
+}
+```
+
+## 两层数据分离：settings_config vs meta
+
+这是 Provider 最重要的设计决策：**"投射到 live 的部分" 和 "只存在 SSOT 的部分" 分离**。
+
+- `settings_config` — 一旦切换，会被**完整写入** `~/.claude/settings.json` 等 live 文件。其 shape 完全对齐目标 CLI 的配置 schema。
+- `meta` — **绝不写入** live 文件，只存在 SSOT。包含 API Key、多 endpoint 列表、健康检查 URL 等代理层需要的信息。
+
+为什么要分？因为**代理层需要读 API Key，但 live 配置不应该暴露它**（或者 live 配置用的是代理 URL 而不是真实 Key）。
+
+```rust
+pub struct ProviderMeta {
+    pub api_key: Option<String>,
+    pub endpoints: Option<Vec<String>>,
+    pub health_check_url: Option<String>,
+    pub balance_config: Option<BalanceConfig>,
+    pub usage_script_id: Option<String>,
+    // ... 更多代理/增强配置
+}
+```
+
+## ProviderManager：每个 App 一个
+
+```rust
+pub struct ProviderManager {
+    pub providers: IndexMap<String, Provider>, // id → Provider
+    pub current: String,                        // 当前选中的 id
+}
+```
+
+用 `IndexMap` 而不是 `HashMap` 的原因：**保持添加顺序**。前端展示需要稳定顺序，同时 `sort_index` 字段可以覆盖默认顺序（拖拽排序）。
+
+## MultiAppConfig：总配置
+
+```rust
+// src-tauri/src/app_config.rs
+pub struct MultiAppConfig {
+    pub version: u32,
+
+    pub claude: ProviderManager,
+    pub codex: ProviderManager,
+    pub gemini: ProviderManager,
+    pub opencode: ProviderManager,
+    pub openclaw: ProviderManager,
+
+    pub mcp_servers: IndexMap<String, McpServer>,
+    pub skills: IndexMap<String, InstalledSkill>,
+    // ...
+}
+```
+
+**`version` 字段是迁移锚点**——当结构变化时，迁移代码根据 version 判断是否需要升级。
+
+## SSOT 到 Live 的投射
+
+伪代码：
+
+```rust
+fn switch_provider(app: AppType, provider_id: &str) -> Result<()> {
+    let cfg = load_multi_app_config()?;
+    let manager = cfg.get_manager(&app);
+    let provider = manager.providers.get(provider_id).ok_or(...)?;
+
+    // 关键一步：把 settings_config 写入 live 位置
+    let live_path = get_live_path(&app);
+    atomic_write_json(&live_path, &provider.settings_config)?;
+
+    // 更新 current
+    let mut cfg = cfg;
+    cfg.get_manager_mut(&app).current = provider_id.to_string();
+    save_multi_app_config(&cfg)?;
+
+    Ok(())
+}
+```
+
+**注意**：Codex 的投射更复杂——它有 `config.toml` 和 `auth.json` 两个文件，见 `codex_config::write_codex_live_atomic`。
+
+## 反向导入：Live → SSOT
+
+用户可能已经有 live 配置文件。`commands/import_export.rs` 提供反向导入：
+
+```rust
+pub async fn import_from_live(app: AppType) -> Result<Provider, AppError> {
+    let live_path = get_live_path(&app);
+    let content = fs::read_to_string(&live_path)?;
+    let settings: Value = json5::from_str(&content)?;  // 容错解析
+
+    let provider = Provider {
+        id: Uuid::new_v4().to_string(),
+        name: "Imported".to_string(),
+        settings_config: settings,
+        // ... 元数据留空
+    };
+
+    // 不自动保存，返回给前端让用户确认
+    Ok(provider)
+}
+```
+
+## Provider ID 生成
+
+用 `uuid::Uuid::new_v4()` 生成——这保证：
+1. 不同设备同步合并时不会冲突
+2. 分享 Provider（Deep Link）时 ID 唯一
+3. Key 不暴露内部计数
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/src/provider.rs` | Provider / ProviderManager / ProviderMeta (997 行) |
+| `src-tauri/src/app_config.rs` | MultiAppConfig / AppType |
+| `src-tauri/src/commands/provider.rs` | Provider CRUD 命令 |
+| `src/types/provider.ts` | 前端类型定义 |

@@ -1,0 +1,165 @@
+---
+title: "第 17 章：流式响应与 SSE"
+description: "SSE 解析、事件回放、Gemini shadow signature"
+sidebar:
+  order: 6
+---
+
+## SSE 基础
+
+Server-Sent Events 是 HTTP 上的单向流协议：
+
+```
+Content-Type: text/event-stream
+
+event: message_start
+data: {"type":"message_start",...}
+
+event: content_block_delta
+data: {"type":"content_block_delta",...}
+
+```
+
+每个事件由：
+- 可选 `event:` 行指定事件名
+- 一或多个 `data:` 行承载 JSON
+- 空行结束
+
+## cc-switch 的 SSE 处理
+
+`proxy/sse.rs` (344 行) 实现了一个 **tokio-stream-based** 的 SSE 解析器：
+
+```rust
+pub struct SseStream {
+    inner: Box<dyn Stream<Item = Bytes> + Send + Unpin>,
+    buffer: Vec<u8>,
+    current_event: Option<SseEvent>,
+}
+
+impl Stream for SseStream {
+    type Item = SseEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<SseEvent>> {
+        // 从 inner 读 bytes 到 buffer
+        // 按行扫描，找 "\n\n" 分隔
+        // 构造 SseEvent 返回
+    }
+}
+```
+
+关键细节：
+- **Bytes 拼接** — 一个 SSE 事件可能跨多个 chunk，需要缓冲
+- **UTF-8 边界** — 不能在字符中间切
+- **反压** — 下游慢于上游时需能堆积
+
+## 流式转发
+
+```rust
+async fn forward_streaming(
+    upstream_resp: Response<Body>,
+    downstream: &mut Sender,
+) -> Result<(), ProxyError> {
+    let body = upstream_resp.into_body();
+    let mut sse = SseStream::new(body);
+
+    while let Some(event) = sse.next().await {
+        // 可能的转换：OpenAI delta → Claude event
+        let transformed = transform_event(event)?;
+
+        // 可能的增强：注入 usage / 矫正 thinking
+        let enhanced = post_process(transformed)?;
+
+        // 写回下游
+        downstream.send(enhanced.to_bytes()).await?;
+    }
+
+    Ok(())
+}
+```
+
+每个事件经过**转换 → 增强 → 发送**三步。
+
+## Claude 事件序列化
+
+```
+message_start
+  → content_block_start (text)
+    → content_block_delta * N
+  → content_block_stop
+  → content_block_start (tool_use)
+    → content_block_delta * N (input_json_delta)
+  → content_block_stop
+→ message_delta (usage)
+→ message_stop
+```
+
+`proxy/providers/streaming.rs` (821 行) 实现 Claude 事件的构造器，能够**从 OpenAI delta 流合成 Claude 事件流**——包括正确处理 tool_use 的 index 分配。
+
+## Gemini Shadow Signature
+
+`proxy/providers/gemini_shadow.rs` (389 行) 解决 Gemini 特有问题。
+
+Gemini 返回的 `functionCall` 可能带 `thoughtSignature`，代表 Gemini 内部的"思考快照"：
+
+```json
+{
+  "content": {
+    "parts": [
+      { "functionCall": {...}, "thoughtSignature": "xyz" }
+    ]
+  }
+}
+```
+
+后续请求必须把这个 `thoughtSignature` **回放**到对应位置，否则 Gemini 会抛错。
+
+Shadow Store 按 session 存储这些 signature：
+
+```rust
+pub struct GeminiShadowStore {
+    sessions: RwLock<HashMap<SessionKey, SessionShadow>>,
+}
+
+pub struct SessionShadow {
+    signatures: Vec<ThoughtSignature>,
+    last_seen: Instant,
+}
+```
+
+回放时，`transform_gemini.rs` 把 signature 注入到对应的 functionResponse：
+
+```rust
+if let Some(sig) = shadow.find_signature_for(&tool_use_id) {
+    function_response["thoughtSignature"] = sig.into();
+}
+```
+
+## Chunked 传输
+
+上游可能返回 `Transfer-Encoding: chunked`。hyper 自动处理分块，但代理要注意**保留 flush 语义**：每个事件到达就立刻下发，不要为了效率而缓冲。
+
+## 错误响应的流式转换
+
+如果上游返回 HTTP 4xx/5xx，cc-switch 会把错误体转换为**Claude 风格的 error 事件**：
+
+```
+event: error
+data: {"type":"error","error":{"type":"overloaded_error","message":"..."}}
+```
+
+这让 CLI 能用统一方式处理错误。
+
+## 压缩
+
+上游可能用 gzip/brotli 压缩响应。cc-switch 用 `flate2` 和 `brotli` crate 透明解压后再处理。
+
+## 本章速查表
+
+| 文件 | 关键函数 |
+|------|---------|
+| `proxy/sse.rs` | `SseStream` |
+| `proxy/providers/streaming.rs` | Claude 事件构造 |
+| `proxy/providers/streaming_responses.rs` | Responses SSE |
+| `proxy/providers/streaming_gemini.rs` | Gemini SSE |
+| `proxy/providers/gemini_shadow.rs` | thoughtSignature 管理 |
+| `proxy/response_processor.rs` | 响应加工 (1,007 行) |

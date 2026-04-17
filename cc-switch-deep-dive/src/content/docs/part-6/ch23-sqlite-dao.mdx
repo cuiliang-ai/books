@@ -1,0 +1,196 @@
+---
+title: "第 23 章：SQLite DAO 与迁移"
+description: "rusqlite + 迁移 + 备份"
+sidebar:
+  order: 1
+---
+
+## 数据库文件
+
+`~/.cc-switch/cc-switch.db` — 与 `config.json` 在同一目录。两者互补：
+- **config.json** — 人可读，适合备份 / 同步 / 调试
+- **cc-switch.db** — 高效查询、事务、索引（用量聚合、熔断状态等）
+
+## 为什么选 rusqlite
+
+`Cargo.toml`:
+
+```toml
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
+```
+
+- `bundled` — 自带 SQLite，不依赖系统 libsqlite3
+- `backup` — 支持 online backup（复制 DB 文件时不停机）
+- `hooks` — 能订阅 DB 写入事件
+
+## DAO 层结构
+
+```
+src-tauri/src/database/
+├── mod.rs               # Database struct + 连接池
+├── schema.rs            # CREATE TABLE 语句
+├── migration.rs         # 迁移版本管理
+├── backup.rs            # 定期备份
+├── tests.rs
+└── dao/
+    ├── mod.rs
+    ├── providers.rs          (636 行)
+    ├── providers_seed.rs     (66 行)
+    ├── universal_providers.rs (74 行)
+    ├── mcp.rs                (103 行)
+    ├── prompts.rs            (88 行)
+    ├── skills.rs             (260 行)
+    ├── proxy.rs              (916 行)
+    ├── failover.rs           (146 行)
+    ├── settings.rs           (327 行)
+    ├── stream_check.rs       (74 行)
+    └── usage_rollup.rs       (309 行)
+```
+
+## Database 结构
+
+```rust
+pub struct Database {
+    conn: Arc<Mutex<rusqlite::Connection>>,
+    path: PathBuf,
+}
+
+impl Database {
+    pub fn open(path: &Path) -> Result<Self, AppError> {
+        let conn = rusqlite::Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+        let db = Self { conn: Arc::new(Mutex::new(conn)), path: path.into() };
+        migration::run_all(&db)?;
+        Ok(db)
+    }
+}
+```
+
+**WAL 模式**：允许并发读，写阻塞少，崩溃安全。
+
+## 迁移系统
+
+```rust
+// database/migration.rs
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../../migrations/001_init.sql")),
+    (2, include_str!("../../migrations/002_add_usage.sql")),
+    // ...
+];
+
+pub fn run_all(db: &Database) -> Result<(), AppError> {
+    let current = db.user_version()?;
+    for (version, sql) in MIGRATIONS {
+        if *version > current {
+            let conn = db.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", version)?;
+            tx.commit()?;
+        }
+    }
+    Ok(())
+}
+```
+
+## DAO 模式
+
+每个 DAO 对应一张（或一组）表。典型 DAO：
+
+```rust
+// database/dao/providers.rs
+pub fn list_providers(db: &Database, app: AppType) -> Result<Vec<Provider>> {
+    let conn = db.conn.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, name, settings_config, ... FROM providers WHERE app = ?1 ORDER BY sort_index"
+    )?;
+    let rows = stmt.query_map(params![app.as_str()], |row| {
+        Provider::from_row(row)
+    })?;
+    rows.collect::<Result<_, _>>().map_err(Into::into)
+}
+
+pub fn upsert_provider(db: &Database, app: AppType, p: &Provider) -> Result<()> {
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO providers (...) VALUES (...)",
+        params![p.id, p.name, json_of(&p.settings_config), ...],
+    )?;
+    Ok(())
+}
+```
+
+## 最复杂的 DAO：proxy.rs（916 行）
+
+包含：
+- Proxy 配置 CRUD
+- 熔断器历史记录
+- Failover 历史
+- 请求日志（可选，有保留期）
+- Usage 实时聚合
+
+## usage_rollup.rs
+
+309 行，负责**按天/按月聚合用量**：
+
+```sql
+CREATE TABLE usage_rollup (
+  id INTEGER PRIMARY KEY,
+  date TEXT NOT NULL,          -- YYYY-MM-DD
+  app TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_creation_tokens INTEGER NOT NULL,
+  cache_read_tokens INTEGER NOT NULL,
+  request_count INTEGER NOT NULL,
+  cost_usd REAL NOT NULL,
+  UNIQUE(date, app, provider_id, model)
+);
+```
+
+每次代理处理完请求：
+
+```rust
+db.usage_rollup.accumulate(UsageSample {
+    date: today(),
+    app, provider_id, model,
+    input_tokens, output_tokens, ...
+    cost: calculate_cost(&pricing, ...),
+})?;
+```
+
+`INSERT ... ON CONFLICT UPDATE` 完成高效累加。
+
+## 备份策略
+
+`database/backup.rs` 每天定期：
+
+```rust
+pub fn run_backup(db: &Database, backup_dir: &Path) -> Result<(), AppError> {
+    let backup_path = backup_dir.join(format!("cc-switch-{}.db", today()));
+    let conn = db.conn.lock().unwrap();
+    let mut backup_conn = Connection::open(&backup_path)?;
+    let backup = Backup::new(&conn, &mut backup_conn)?;
+    backup.run_to_completion(5, Duration::from_millis(100), None)?;
+
+    // 保留最近 N 份
+    rotate_backups(backup_dir, 10)?;
+    Ok(())
+}
+```
+
+**Online backup API** 允许在 DB 仍在被写入的情况下复制，不阻塞主业务。
+
+## 本章速查表
+
+| 文件 | 职责 |
+|------|------|
+| `database/mod.rs` | `Database` + 连接池 |
+| `database/schema.rs` | DDL 语句 |
+| `database/migration.rs` | 版本管理 |
+| `database/backup.rs` | 定期备份 |
+| `database/dao/*.rs` | 按表 DAO |

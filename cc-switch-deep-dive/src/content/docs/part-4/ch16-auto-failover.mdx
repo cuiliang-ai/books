@@ -1,0 +1,158 @@
+---
+title: "第 16 章：自动 Failover 与切换锁"
+description: "FailoverSwitchManager 如何让 UI 直观反映切换"
+sidebar:
+  order: 5
+---
+
+## 为什么 Failover 需要单独的 Manager
+
+熔断器只负责"这个 Provider 不能用了"，Failover 还要解决：
+
+1. **去重** — 多个并发请求同时触发 Failover，不应多次切换
+2. **UI 反馈** — 自动切换后，托盘菜单、Provider 卡片高亮都要更新
+3. **事件广播** — 通知用户"已切换到 X"
+4. **失败保护** — 切换过程本身可能失败
+
+这就是 `FailoverSwitchManager` 存在的原因（`proxy/failover_switch.rs`）。
+
+## Manager 结构
+
+```rust
+pub struct FailoverSwitchManager {
+    pending_switches: Arc<RwLock<HashSet<String>>>,  // "app_type:provider_id"
+    db: Arc<Database>,
+}
+
+impl FailoverSwitchManager {
+    pub async fn try_switch(
+        &self,
+        app_handle: Option<&tauri::AppHandle>,
+        app_type: &str,
+        provider_id: &str,
+        provider_name: &str,
+    ) -> Result<bool, AppError> {
+        let switch_key = format!("{app_type}:{provider_id}");
+
+        // 去重检查
+        {
+            let pending = self.pending_switches.read().await;
+            if pending.contains(&switch_key) {
+                return Ok(false);  // 已在进行中
+            }
+        }
+
+        // 标记 pending
+        self.pending_switches.write().await.insert(switch_key.clone());
+
+        // 执行切换
+        let result = self.do_switch(app_handle, app_type, provider_id, provider_name).await;
+
+        // 清理标记
+        self.pending_switches.write().await.remove(&switch_key);
+
+        result.map(|_| true)
+    }
+}
+```
+
+## 切换的完整流程
+
+```rust
+async fn do_switch(...) -> Result<(), AppError> {
+    // 1. 更新 DB 中的 current
+    self.db.update_current_provider(app_type, provider_id)?;
+
+    // 2. 更新代理 state 的 current_providers
+    state.current_providers.write().await
+        .insert(app_type.into(), (provider_id.into(), provider_name.into()));
+
+    // 3. 发送事件给前端
+    if let Some(app) = app_handle {
+        app.emit("provider-switched", ProviderSwitchEvent {
+            app_id: app_type.into(),
+            provider_id: provider_id.into(),
+            provider_name: provider_name.into(),
+            trigger: "failover",  // 区分手动切换
+        })?;
+
+        // 4. 更新托盘菜单
+        tray::update_tray_menu(app, &self.db).await?;
+    }
+
+    Ok(())
+}
+```
+
+**关键点**：Failover 在**代理模式下**不改 live 文件（因为 CLI 指向代理 URL，代理内部切换即可）。
+
+## Failover Queue
+
+Failover 候选不是"所有 Provider"，而是用户标记的**队列**。前端 `src/components/proxy/FailoverQueueManager.tsx` 允许用户拖拽排序：
+
+```
+FailoverQueue:
+  1. current provider
+  2. backup 1
+  3. backup 2
+  ...
+```
+
+Provider 的 `in_failover_queue` 字段控制是否入队。
+
+## 切换锁与 Failover 的协作
+
+```rust
+// 熔断触发时
+match result {
+    Err(_) => {
+        breaker.record_failure().await;
+        if breaker.state() == CircuitState::Open {
+            // 选下一个候选
+            if let Some(next) = select_next_candidate(&candidates, &current) {
+                failover_manager.try_switch(
+                    app_handle,
+                    app_type,
+                    &next.id,
+                    &next.name,
+                ).await?;
+            }
+        }
+    }
+    _ => {}
+}
+```
+
+## Failover 的用户感知
+
+对用户而言：
+1. Provider 卡片突然显示 "Failover" 徽章
+2. 托盘图标的高亮项切到新 Provider
+3. Toast 弹出："Claude Code 已切换到 DeepSeek"
+4. 请求响应正常到达（CLI 完全无感）
+
+## 手动关闭 Failover
+
+```rust
+#[tauri::command]
+pub async fn toggle_failover(enabled: bool) -> Result<(), AppError>;
+```
+
+用户在前端点 `FailoverToggle` 就能开关 Failover。关闭后：
+- 熔断器仍然工作（防止反复重试）
+- 但不再自动切 Provider，返回 5xx 给 CLI
+
+## 为什么不用 tower-retry 或其他现成库
+
+`tower-retry` 是"同一个上游重试"，不是"切换上游"。cc-switch 的 Failover 语义是**跨 Provider**，需要访问自定义的 ProviderRouter + CircuitBreaker + FailoverQueue 状态。手写反而更直接。
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `proxy/failover_switch.rs` | `FailoverSwitchManager` |
+| `proxy/provider_router.rs` | 触发 failover 的调用点 |
+| `commands/failover.rs` | Failover 相关命令 |
+| `src/components/proxy/FailoverQueueManager.tsx` | 队列管理 UI |
+| `src/components/proxy/FailoverToggle.tsx` | 开关 |
+| `src/components/providers/FailoverPriorityBadge.tsx` | 优先级徽章 |

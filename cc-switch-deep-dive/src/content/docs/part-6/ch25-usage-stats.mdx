@@ -1,0 +1,168 @@
+---
+title: "第 25 章：用量统计与成本追踪"
+description: "两个数据源：代理实时 vs. 会话事后解析"
+sidebar:
+  order: 3
+---
+
+## 两个数据源
+
+cc-switch 用量统计有两个互补来源：
+
+1. **代理实时** — 所有经过本地代理的请求，实时聚合到 `usage_rollup` 表
+2. **会话事后解析** — 扫描 CLI 的 session 文件，从中提取用量（适用于不走代理的请求）
+
+## 代理侧：usage 模块
+
+```
+proxy/usage/
+├── mod.rs
+├── calculator.rs   # 计算 tokens + 成本
+├── logger.rs       # 记录到 DB
+└── parser.rs       # 从响应提取 usage 字段
+```
+
+### parser.rs：解析响应
+
+不同协议响应里 usage 字段位置不同：
+
+```rust
+// Claude Messages
+{ "usage": { "input_tokens": 100, "output_tokens": 200,
+             "cache_creation_input_tokens": 50, "cache_read_input_tokens": 30 } }
+
+// OpenAI Chat
+{ "usage": { "prompt_tokens": 100, "completion_tokens": 200 } }
+
+// Gemini
+{ "usageMetadata": { "promptTokenCount": 100, "candidatesTokenCount": 200 } }
+```
+
+`parser.rs` 按协议类型统一提取到 `UsageSample`：
+
+```rust
+pub struct UsageSample {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_input_tokens: u64,
+    pub model: String,
+    pub provider_id: String,
+    pub app: String,
+}
+```
+
+### calculator.rs：计算成本
+
+```rust
+pub fn calculate_cost(
+    sample: &UsageSample,
+    pricing: &ModelPricing,
+) -> f64 {
+    let input = sample.input_tokens as f64 / 1_000_000.0;
+    let output = sample.output_tokens as f64 / 1_000_000.0;
+    let cache_write = sample.cache_creation_tokens as f64 / 1_000_000.0;
+    let cache_read = sample.cache_read_tokens as f64 / 1_000_000.0;
+
+    input * pricing.input_per_million
+        + output * pricing.output_per_million
+        + cache_write * pricing.cache_write_per_million
+        + cache_read * pricing.cache_read_per_million
+}
+```
+
+### 价格表来源
+
+用户可自定义价格（`src/components/usage/PricingConfigPanel.tsx`）。有默认值内置。
+
+## 服务层：services/usage_stats.rs（1,930 行）
+
+这个大模块负责：
+- 聚合查询（按日 / 周 / 月 / 自定义范围）
+- 分组维度（按 app / provider / model）
+- 趋势计算
+- 数据导出 (CSV / JSON)
+
+```rust
+pub async fn get_usage_summary(
+    db: &Database,
+    range: DateRange,
+    group_by: GroupBy,
+) -> Result<UsageSummary, AppError>
+```
+
+## 订阅类 Provider：services/subscription.rs（1,309 行）
+
+GitHub Copilot / ChatGPT Plus 等是**订阅模式**，用量计费不同：
+
+- Copilot 有每月**代码建议次数配额**
+- ChatGPT Plus 有每 3 小时的**请求次数限制**
+
+这些不是按 token 计费，cc-switch 单独处理：
+- 从上游 API 拉取 quota 信息
+- 在 UI 显示进度条
+- `src/components/CopilotQuotaFooter.tsx` 等底栏
+
+## 会话事后解析
+
+`services/session_usage*.rs`：扫描 session 文件，提取每条消息的 usage：
+
+- `session_usage.rs` (639 行) — Claude
+- `session_usage_codex.rs` (813 行) — Codex
+- `session_usage_gemini.rs` (504 行) — Gemini
+
+这是**兜底**机制：即使用户没开代理，也能拿到历史用量。
+
+## 余额查询脚本
+
+每个 Provider 的余额 API 格式不同。`usage_script.rs` (644 行) 用 **rquickjs**（嵌入式 JavaScript）允许用户写脚本：
+
+```javascript
+// 用户定义的余额查询脚本
+async function fetch_balance(apiKey, endpoint) {
+  const resp = await fetch(`${endpoint}/user/balance`, {
+    headers: { Authorization: `Bearer ${apiKey}` }
+  });
+  const data = await resp.json();
+  return {
+    total: data.balance_usd,
+    used: data.used_usd,
+  };
+}
+```
+
+这段 JS 在 Rust 中用 rquickjs 执行，提供极大的灵活性。
+
+## 前端
+
+```
+src/components/usage/
+├── UsageDashboard.tsx
+├── UsageSummaryCards.tsx
+├── UsageTrendChart.tsx      (recharts)
+├── UsageDateRangePicker.tsx
+├── ModelStatsTable.tsx
+├── ProviderStatsTable.tsx
+├── RequestDetailPanel.tsx
+├── RequestLogTable.tsx
+├── DataSourceBar.tsx
+├── ModelTestConfigPanel.tsx
+├── PricingConfigPanel.tsx
+├── PricingEditModal.tsx
+└── format.ts
+```
+
+## 本章速查表
+
+| 文件 | 行数 |
+|------|------|
+| `proxy/usage/parser.rs` | - |
+| `proxy/usage/calculator.rs` | - |
+| `proxy/usage/logger.rs` | - |
+| `services/usage_stats.rs` | 1,930 |
+| `services/subscription.rs` | 1,309 |
+| `services/session_usage*.rs` | 1,956 (合计) |
+| `services/balance.rs` | 411 |
+| `src-tauri/src/usage_script.rs` | 644 |
+| `database/dao/usage_rollup.rs` | 309 |

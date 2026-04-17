@@ -1,0 +1,144 @@
+---
+title: "第 14 章：Claude / Codex / Gemini 协议适配"
+description: "三种 API 风格的转换矩阵"
+sidebar:
+  order: 3
+---
+
+## 三种主流 API 风格
+
+| 风格 | 代表 | 特征 |
+|------|------|------|
+| **Messages API** | Anthropic Claude | `messages[]` + `system` + `tools` + `thinking` |
+| **Chat Completions** | OpenAI | `messages[]` 含 system 角色 + `tools` |
+| **Responses API** | OpenAI 新 API | `input[]` + `instructions` + `tools` |
+| **GenerateContent** | Google Gemini | `contents[]` + `generationConfig` + `tools` |
+
+cc-switch 的 `proxy/providers/` 目录为每种风格提供专用适配器：
+
+| 文件 | 行数 | 作用 |
+|------|------|------|
+| `claude.rs` | 1,313 | Claude Messages API 处理 |
+| `codex.rs` | 305 | Codex (OpenAI) 处理 |
+| `gemini.rs` | 442 | Gemini GenerateContent |
+| `transform.rs` | 1,193 | Claude ↔ OpenAI 通用转换 |
+| `transform_responses.rs` | 1,329 | Claude ↔ Responses API |
+| `transform_gemini.rs` | 2,152 | Claude ↔ Gemini 转换 |
+| `streaming.rs` | 821 | 通用 SSE 流式解析 |
+| `streaming_responses.rs` | 1,070 | Responses SSE |
+| `streaming_gemini.rs` | 1,054 | Gemini SSE |
+| `gemini_schema.rs` | 338 | Gemini schema 定义 |
+| `gemini_shadow.rs` | 389 | thoughtSignature 状态存储 |
+| `auth.rs` | 259 | 认证头构造 |
+| `codex_oauth_auth.rs` | 1,132 | Codex OAuth 令牌刷新 |
+| `copilot_auth.rs` | 1,820 | GitHub Copilot 认证 |
+| `adapter.rs` | 50 | 适配器 trait |
+| `mod.rs` | 515 | 统一入口 |
+
+**注意**：`transform_gemini.rs` 2K+ 行，因为 Claude ↔ Gemini 的语义差异最大（工具调用、多模态、思考）。
+
+## 一次 Claude → OpenAI 转换
+
+CLI 发给代理的请求：
+
+```json
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "max_tokens": 4096,
+  "system": "You are a helpful assistant.",
+  "messages": [
+    { "role": "user", "content": "Hello" }
+  ],
+  "stream": true
+}
+```
+
+经过 `transform.rs::claude_to_openai`：
+
+```json
+{
+  "model": "gpt-4",
+  "max_tokens": 4096,
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "Hello" }
+  ],
+  "stream": true
+}
+```
+
+关键变换：
+- `system` 字段 → messages 数组前置插入 system 消息
+- `max_tokens` 保留（语义相同）
+- `thinking` 字段丢弃（OpenAI 不支持）
+- 工具 definitions 格式转换
+
+## 流式响应：Claude 风格
+
+Claude 的 SSE 事件类型：
+
+```
+event: message_start
+data: { "type": "message_start", "message": {...} }
+
+event: content_block_start
+data: { "type": "content_block_start", "index": 0, "content_block": {...} }
+
+event: content_block_delta
+data: { "type": "content_block_delta", "index": 0, "delta": {"type":"text_delta","text":"Hello"} }
+
+event: content_block_stop
+...
+
+event: message_delta
+data: { "type": "message_delta", "usage": {...} }
+
+event: message_stop
+```
+
+## 流式响应：OpenAI 风格
+
+```
+data: {"choices":[{"delta":{"role":"assistant","content":""}}]}
+data: {"choices":[{"delta":{"content":"Hello"}}]}
+...
+data: [DONE]
+```
+
+**差异**：Claude 是事件驱动（多种 event 类型），OpenAI 是扁平化的 delta。cc-switch 的 `streaming.rs` 负责**把 OpenAI 风格的 delta 流转为 Claude 风格的事件流**，让 Claude CLI 能正常处理。
+
+## Codex OAuth 刷新
+
+Codex 的认证不用 API Key，用 OAuth 令牌。`codex_oauth_auth.rs` 1,132 行处理：
+
+- 令牌自动刷新（过期前 5 分钟）
+- 刷新互斥（多并发请求时只刷一次）
+- 失败重试
+- Token 加密存储
+
+```rust
+pub struct CodexOAuthManager {
+    auth_path: PathBuf,
+    refresh_lock: Mutex<()>,
+    cache: RwLock<Option<CachedToken>>,
+}
+```
+
+## GitHub Copilot 的奇葩认证
+
+`copilot_auth.rs` 1,820 行——处理 GitHub Copilot 的两阶段认证：
+
+1. 用 OAuth token 换取临时 API token
+2. 临时 token 短期有效（分钟级），需频繁刷新
+3. 部分 endpoint 需要额外 header（`Editor-Version`, `Copilot-Integration-Id`）
+
+整个流程用 `copilot_optimizer.rs` 统一管理，对上层透明。
+
+## 本章速查表
+
+| 协议维度 | 关键文件 |
+|---------|---------|
+| Claude Messages | `providers/claude.rs` + `transform.rs` |
+| OpenAI Responses | `transform_responses.rs` + `streaming_responses.rs` |
+| Gemini | `providers/gemini.rs` + `transform_gemini.rs` + `gemini_shadow.rs` |
+| OAuth / Copilot | `codex_oauth_auth.rs` + `copilot_auth.rs` |

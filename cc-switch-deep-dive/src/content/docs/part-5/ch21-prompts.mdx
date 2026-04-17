@@ -1,0 +1,84 @@
+---
+title: "第 21 章：Prompts 与系统提示管理"
+description: "系统提示的多 App 同步与切换"
+sidebar:
+  order: 3
+---
+
+## 什么是 Prompt（在 cc-switch 语境下）
+
+这里的 Prompt 特指 **System Prompt** —— 每个 CLI 启动时加载的系统提示词。不同 CLI 的存储位置：
+
+- Claude Code：`~/.claude/CLAUDE.md`（项目级）+ `~/.claude/MEMORY.md`
+- Codex：`~/.codex/instructions.md`
+- Gemini：`~/.gemini/GEMINI.md`
+- OpenCode：类似
+
+cc-switch 的 Prompt 面板把这些统一管理。
+
+## 数据模型
+
+```rust
+pub struct PromptEntry {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    pub enabled: bool,
+    pub apps: PromptApps,
+    pub tags: Vec<String>,
+}
+```
+
+和 MCP/Skills 一样的 **SSOT + apps** 模式。
+
+## 实现
+
+| 文件 | 职责 |
+|------|------|
+| `src-tauri/src/prompt.rs` | 模型封装 |
+| `src-tauri/src/prompt_files.rs` | 文件 IO |
+| `src-tauri/src/commands/prompt.rs` | IPC 命令 (64 行) |
+| `src-tauri/src/services/prompt.rs` | 服务 (242 行) |
+| `src-tauri/src/database/dao/prompts.rs` | DAO (88 行) |
+| `src/components/prompts/PromptPanel.tsx` | 主面板 |
+| `src/components/prompts/PromptFormModal.tsx` | 编辑对话框 |
+
+## 多 Prompt 合并
+
+一个 App 可以启用多个 Prompt，cc-switch 会按顺序拼接写入 live 文件：
+
+```
+=== Prompt A ===
+<content A>
+
+=== Prompt B ===
+<content B>
+```
+
+用户可以**拖拽排序**（`@dnd-kit`），决定合并顺序。
+
+## Markdown 编辑器
+
+`src/components/MarkdownEditor.tsx` 基于 CodeMirror 6，支持：
+- 语法高亮（`@codemirror/lang-markdown`）
+- 主题切换（`@codemirror/theme-one-dark`）
+- Lint（`@codemirror/lint`）
+
+## Daily Memory
+
+特殊类型的 Prompt，见 `src/components/workspace/DailyMemoryPanel.tsx` —— 每日滚动的"今日记忆"，启用后前置注入到 system prompt。设计借鉴了 Hermes Agent 的 MEMORY.md 思路。
+
+## Deep Link
+
+```
+ccswitch://v1/import?resource=prompt&name=Refactor%20Style&content=...&apps=claude
+```
+
+## 本章速查表
+
+| 文件 | 关键内容 |
+|------|---------|
+| `src-tauri/src/commands/prompt.rs` | CRUD |
+| `src-tauri/src/services/prompt.rs` | 242 行服务 |
+| `src/components/prompts/` | 面板 + 表单 |
+| `src/components/MarkdownEditor.tsx` | 编辑器 |

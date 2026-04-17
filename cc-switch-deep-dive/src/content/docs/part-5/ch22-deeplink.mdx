@@ -1,0 +1,167 @@
+---
+title: "第 22 章：Deep Link 导入协议"
+description: "ccswitch:// URL 的解析与导入流程"
+sidebar:
+  order: 4
+---
+
+## 为什么要 Deep Link
+
+场景：你的同事或 Provider 官方想让你"一键配置好"。如果只靠文档截图，成本高、易出错。Deep Link 把**配置数据编码进 URL**，点击即可导入。
+
+## URL 格式
+
+```
+ccswitch://v1/import?resource={provider|prompt|mcp|skill}&<fields>
+```
+
+示例：
+
+```
+# 导入 Provider
+ccswitch://v1/import?resource=provider&app=claude&name=DeepSeek&endpoint=https://api.deepseek.com&apiKey=sk-...
+
+# 导入 MCP
+ccswitch://v1/import?resource=mcp&name=filesystem&command=npx&args=@mcp/server-filesystem&apps=claude,codex
+
+# 导入 Skill
+ccswitch://v1/import?resource=skill&name=git-flow&source=https://github.com/xxx/skills
+
+# 导入 Prompt
+ccswitch://v1/import?resource=prompt&name=Rubber%20Duck&content=...&apps=claude
+```
+
+## 解析：deeplink/parser.rs
+
+```rust
+pub fn parse_deeplink_url(url: &str) -> Result<DeepLinkImportRequest, AppError> {
+    let url = Url::parse(url)?;
+
+    if url.scheme() != "ccswitch" {
+        return Err(AppError::Custom("Invalid scheme".into()));
+    }
+
+    // 提取 host (= version) 和 path (= action)
+    let version = url.host_str().unwrap_or("v1").to_string();
+    let action = url.path().trim_start_matches('/');
+
+    // 解析 query 参数
+    let params: HashMap<String, String> = url.query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+    Ok(DeepLinkImportRequest {
+        version,
+        resource: params.get("resource").cloned().unwrap_or_default(),
+        app: params.get("app").cloned(),
+        name: params.get("name").cloned(),
+        endpoint: params.get("endpoint").cloned(),
+        api_key: params.get("apiKey").cloned(),
+        // ... 所有字段
+    })
+}
+```
+
+`DeepLinkImportRequest` 是一个"胖结构"——所有可能字段都在里面，按 `resource` 字段分支。
+
+## 资源分发
+
+```rust
+pub async fn handle_deeplink(req: DeepLinkImportRequest) -> Result<...> {
+    match req.resource.as_str() {
+        "provider" => deeplink::provider::import_provider_from_deeplink(req).await,
+        "prompt"   => deeplink::prompt::import_prompt_from_deeplink(req).await,
+        "mcp"      => deeplink::mcp::import_mcp_from_deeplink(req).await,
+        "skill"    => deeplink::skill::import_skill_from_deeplink(req).await,
+        _ => Err(...),
+    }
+}
+```
+
+## 触发路径
+
+两种触发方式：
+
+### 方式 A：系统级协议注册（浏览器点击）
+
+Tauri plugin `tauri-plugin-deep-link` 在 macOS/Windows/Linux 分别注册 URL scheme：
+
+- macOS: `Info.plist` 的 `CFBundleURLSchemes`
+- Windows: 注册表 `HKCR\ccswitch\shell\open\command`
+- Linux: `.desktop` 文件 + `xdg-mime`
+
+```rust
+// lib.rs setup
+app.deep_link().on_open_url(|urls| {
+    for url in urls {
+        app.emit("deeplink-received", url.to_string()).ok();
+    }
+});
+```
+
+### 方式 B：应用内粘贴
+
+`src/components/DeepLinkImportDialog.tsx` 提供一个输入框，用户可以粘贴 `ccswitch://` URL。适用于复制粘贴不被浏览器自动处理的场景。
+
+## 用户确认 UI
+
+接收 URL 后，不自动导入 —— 弹出确认对话框：
+
+```
+src/components/deeplink/
+├── McpConfirmation.tsx
+├── PromptConfirmation.tsx
+└── SkillConfirmation.tsx
+```
+
+展示将要导入的内容（字段明细 + 预览），让用户：
+- 看到 API Key 前几位（避免误导）
+- 修改名字
+- 选择目标 Apps
+- 确认 / 取消
+
+## 安全
+
+Deep Link 是**用户触发**的（用户点击链接），所以可信度比系统自动行为高。但仍需防护：
+
+1. **Key 脱敏展示** — UI 里只显示前 4 位 + ***
+2. **二次确认** — 导入 API Key 需要用户主动点"确认"
+3. **Scheme 校验** — 只接受 `ccswitch://`，其他 scheme 丢弃
+4. **长度限制** — `DEFAULT_BODY_LIMIT` 防止超大 URL 爆内存
+
+## 生成 Deep Link
+
+cc-switch 也能**生成** URL（分享用）：
+
+```rust
+pub fn generate_deeplink_for_provider(p: &Provider) -> String {
+    let mut url = Url::parse("ccswitch://v1/import").unwrap();
+    url.query_pairs_mut()
+        .append_pair("resource", "provider")
+        .append_pair("app", "claude")
+        .append_pair("name", &p.name)
+        .append_pair("endpoint", &p.endpoint())
+        // 注意：不自动导出 API Key
+        ;
+    url.to_string()
+}
+```
+
+**策略**：生成时默认**不包含 API Key**，用户要分享时需显式勾选"包含 Key"。
+
+## 本章速查表
+
+| 文件 | 职责 |
+|------|------|
+| `src-tauri/src/deeplink/mod.rs` | 顶层导出 |
+| `src-tauri/src/deeplink/parser.rs` | URL 解析 |
+| `src-tauri/src/deeplink/provider.rs` | Provider 导入 |
+| `src-tauri/src/deeplink/mcp.rs` | MCP 导入 |
+| `src-tauri/src/deeplink/prompt.rs` | Prompt 导入 |
+| `src-tauri/src/deeplink/skill.rs` | Skill 导入 |
+| `src-tauri/src/deeplink/utils.rs` | 公共工具 |
+| `src-tauri/src/deeplink/tests.rs` | 单元测试 |
+| `src-tauri/src/commands/deeplink.rs` | IPC 命令 |
+| `src/components/DeepLinkImportDialog.tsx` | 主对话框 |
+| `src/components/deeplink/*Confirmation.tsx` | 确认组件 |
+| `deplink.html` | 根目录的 demo HTML |

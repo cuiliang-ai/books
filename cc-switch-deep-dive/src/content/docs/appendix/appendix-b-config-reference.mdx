@@ -1,0 +1,232 @@
+---
+title: "附录 B：配置文件参考"
+description: "~/.cc-switch/ + 各 CLI live 文件的完整 schema"
+sidebar:
+  order: 2
+---
+
+## `~/.cc-switch/` 目录
+
+```
+~/.cc-switch/
+├── config.json           # 主配置 (MultiAppConfig)
+├── config.json.bak       # 自动备份
+├── cc-switch.db          # SQLite 数据库
+├── cc-switch.db-wal      # WAL
+├── cc-switch.db-shm      # Shared memory
+├── backups/              # 定期备份
+│   ├── cc-switch-2026-04-15.db
+│   └── ...
+├── skills/               # Skills SSOT 目录
+│   ├── git-workflow/
+│   │   ├── SKILL.md
+│   │   └── ...
+│   └── ...
+├── logs/                 # 日志
+│   └── cc-switch.log
+└── state.json            # 运行时状态 (minor)
+```
+
+## config.json 示例
+
+```json
+{
+  "version": 4,
+  "claude": {
+    "providers": {
+      "uuid-1": {
+        "id": "uuid-1",
+        "name": "Anthropic",
+        "settingsConfig": {
+          "provider": { "base_url": "https://api.anthropic.com" }
+        },
+        "websiteUrl": "https://anthropic.com",
+        "category": "official",
+        "createdAt": 1713000000000,
+        "sortIndex": 0,
+        "meta": {
+          "apiKey": "sk-ant-...",
+          "endpoints": ["https://api.anthropic.com"]
+        },
+        "icon": "anthropic",
+        "iconColor": "#D97757",
+        "inFailoverQueue": true
+      }
+    },
+    "current": "uuid-1"
+  },
+  "codex": { "providers": {}, "current": "" },
+  "gemini": { "providers": {}, "current": "" },
+  "opencode": { "providers": {}, "current": "" },
+  "openclaw": { "providers": {}, "current": "" },
+  "mcpServers": {
+    "filesystem": {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "env": {},
+      "enabled": true,
+      "apps": { "claude": true, "codex": true, "gemini": false, "opencode": false }
+    }
+  },
+  "skills": {
+    "skill-uuid-1": {
+      "id": "skill-uuid-1",
+      "name": "git-workflow",
+      "source": { "type": "github", "url": "https://github.com/..." },
+      "apps": { "claude": true, "codex": false, "gemini": false, "opencode": false, "openclaw": false }
+    }
+  }
+}
+```
+
+## AppSettings 示例
+
+`settings.rs` 的 `AppSettings`（存在 SQLite 的 `settings` 表）：
+
+| 字段 | 默认值 | 说明 |
+|------|-------|------|
+| `language` | "en" | UI 语言 |
+| `theme` | "system" | light/dark/system |
+| `autoLaunch` | false | 开机自启 |
+| `closeToTray` | true | 关闭最小化到托盘 |
+| `claudeOverrideDir` | null | Claude 目录覆盖 |
+| `codexOverrideDir` | null | Codex 目录覆盖 |
+| `geminiOverrideDir` | null | Gemini 目录覆盖 |
+| `proxyPort` | 0 (auto) | 代理端口 |
+| `proxyEnabled` | false | 代理启用 |
+| `failoverEnabled` | false | Failover 启用 |
+| `circuitBreakerConfig` | `{...}` | 熔断器配置 |
+| `autoUpdate` | true | 自动检查更新 |
+| `webdavSyncConfig` | null | WebDAV 配置 |
+| `skillStorageLocation` | `~/.cc-switch/skills` | Skill 存储位置 |
+
+## Claude Live 配置
+
+`~/.claude/settings.json`:
+
+```json
+{
+  "provider": {
+    "base_url": "https://api.anthropic.com",
+    "api_key": "sk-ant-..."
+  },
+  "model": {
+    "name": "claude-3-5-sonnet-20241022",
+    "max_tokens": 8192
+  }
+}
+```
+
+`~/.claude.json`（MCP 配置）:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": { "command": "npx", "args": [...] }
+  }
+}
+```
+
+## Codex Live 配置
+
+`~/.codex/config.toml`:
+
+```toml
+[profile.default]
+model_provider = "default"
+model = "gpt-4"
+
+[model_providers.default]
+base_url = "https://api.openai.com/v1"
+```
+
+`~/.codex/auth.json`:
+
+```json
+{
+  "default": { "api_key": "sk-..." }
+}
+```
+
+## Gemini Live 配置
+
+`~/.gemini/settings.json`:
+
+```json
+{
+  "selectedAuthType": "api_key",
+  "apiKey": "...",
+  "model": "gemini-2.0-flash"
+}
+```
+
+## Proxy 配置
+
+`ProxyConfig`（SQLite `proxy_config` 表）:
+
+```json
+{
+  "port": 0,
+  "host": "127.0.0.1",
+  "enabled": false,
+  "bodyLimitMB": 100,
+  "circuitBreaker": {
+    "failureThreshold": 4,
+    "successThreshold": 2,
+    "timeoutSeconds": 60,
+    "errorRateThreshold": 0.6,
+    "minRequests": 10
+  },
+  "thinkingRectifier": {
+    "stripIncompatible": true,
+    "adjustBudget": true,
+    "minBudget": 1024
+  }
+}
+```
+
+## Deep Link 字段参考
+
+| 字段 | 资源类型 | 说明 |
+|------|---------|------|
+| `resource` | 所有 | provider/prompt/mcp/skill |
+| `app` | provider/prompt/skill | 目标 CLI |
+| `apps` | mcp/prompt/skill | 逗号分隔 |
+| `name` | 所有 | 资源名 |
+| `enabled` | 所有 | 导入后是否启用 |
+| `homepage` | provider | 主页 URL |
+| `endpoint` | provider | API 基础 URL（可逗号多个） |
+| `apiKey` | provider | API 密钥 |
+| `icon` / `iconColor` | provider | 图标 |
+| `category` | provider | 分类 |
+| `command` / `args` / `env` | mcp | MCP 启动参数 |
+| `content` | prompt | Prompt 内容（URL 编码） |
+| `source` | skill | Skill 来源 URL |
+| `version` | 所有 | 协议版本（当前 `v1`） |
+
+## 环境变量
+
+| 变量 | 用途 |
+|------|------|
+| `CC_SWITCH_TEST_HOME` | 测试覆盖 home dir |
+| `RUST_LOG` | 日志级别 |
+| `CC_SWITCH_DEV` | 开发模式标志 |
+
+## 日志位置
+
+| 平台 | 路径 |
+|------|------|
+| macOS | `~/Library/Logs/cc-switch/` |
+| Windows | `%LOCALAPPDATA%\cc-switch\logs\` |
+| Linux | `~/.local/share/cc-switch/logs/` |
+
+（Tauri 2 默认；可能因 `identifier` 差异）
+
+## 结束语
+
+至此，全书 30 章 + 2 附录完结。希望你已经从 cc-switch 这个精心打磨的项目里，学到一些关于**Rust + Tauri 2 + React** 实战工程的心法，以及一些关于 **AI 工具链工程化** 的设计思考。
+
+Happy hacking!
+
+— Liang Cui, 2026

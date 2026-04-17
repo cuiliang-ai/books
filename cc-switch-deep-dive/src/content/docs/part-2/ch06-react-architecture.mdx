@@ -1,0 +1,211 @@
+---
+title: "第 6 章：React 前端组件架构"
+description: "App.tsx → 业务面板 → Query → IPC 的分层"
+sidebar:
+  order: 3
+---
+
+## 顶层组件：App.tsx
+
+`src/App.tsx` 是整个前端的单体顶层（这种设计反映了应用的"单页工具"性质，不需要路由库）。
+
+关键职责：
+
+1. **AppSwitcher** — 切换 5 个 CLI 的 Tab
+2. **主面板路由** — 根据当前选中的 App + 视图，渲染对应子面板
+3. **全局对话框** — AddProvider / EditProvider / DeepLinkImport / FirstRun
+4. **事件监听** — 监听后端发出的 `provider-switched`, `env-conflict-detected` 等事件
+5. **快捷键** — `Escape` 关闭 dialog、`Ctrl+F` 搜索等
+
+看一眼 `App.tsx` 开头的导入清单（节选）：
+
+```tsx
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { useQueryClient } from "@tanstack/react-query";
+import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
+import { useProviderActions } from "@/hooks/useProviderActions";
+import { ProviderList } from "@/components/providers/ProviderList";
+import { UnifiedMcpPanel } from "@/components/mcp/UnifiedMcpPanel";
+import { SkillsPage } from "@/components/skills/SkillsPage";
+import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
+// ...
+```
+
+这些导入揭示了核心结构：**App 用 Query hooks 读数据，用 action hooks 写数据，把数据注入面板组件**。
+
+## 组件层次
+
+```
+<ThemeProvider>
+  <QueryClientProvider>
+    <UpdateProvider>
+      <App>
+        ├── <CustomTitleBar />              (Windows/Linux 自绘标题栏)
+        ├── <AppSwitcher />                 (Claude/Codex/Gemini/OpenCode/OpenClaw)
+        ├── 视图切换主区域：
+        │   ├── <ProviderList />            (默认视图)
+        │   ├── <UnifiedMcpPanel />         (MCP 面板)
+        │   ├── <UnifiedSkillsPanel />      (Skills 面板)
+        │   ├── <PromptPanel />             (Prompts)
+        │   ├── <AgentsPanel />             (Claude Agents)
+        │   ├── <SessionManagerPage />      (会话)
+        │   ├── <WorkspaceFilesPanel />     (工作区)
+        │   ├── <UsageDashboard />          (用量)
+        │   ├── <UniversalProviderPanel />  (通用 Provider)
+        │   └── <SettingsPage />            (设置)
+        ├── <ProxyToggle /> <FailoverToggle />
+        ├── <EnvWarningBanner />
+        ├── <UpdateBadge />
+        └── Dialogs:
+            <AddProviderDialog />
+            <EditProviderDialog />
+            <DeepLinkImportDialog />
+            <FirstRunNoticeDialog />
+            <ConfirmDialog />
+            <UsageScriptModal />
+      </App>
+    </UpdateProvider>
+  </QueryClientProvider>
+</ThemeProvider>
+```
+
+## 数据流：TanStack Query
+
+`src/lib/query/` 封装所有 API 调用：
+
+```
+lib/query/
+├── index.ts           # queryClient 导出
+├── keys.ts            # query keys 定义（避免字符串散落）
+├── providers.ts       # useProvidersQuery / useSwitchProvider
+├── settings.ts        # useSettingsQuery / useUpdateSettings
+├── mcp.ts             # useMcpListQuery / useMcpToggle
+├── skills.ts          # ...
+├── prompts.ts
+├── proxy.ts
+├── sessions.ts
+├── usage.ts
+└── omo.ts
+```
+
+每个文件典型结构：
+
+```typescript
+export const providerKeys = {
+  all: ['providers'] as const,
+  app: (appId: AppId) => ['providers', appId] as const,
+};
+
+export function useProvidersQuery(appId: AppId) {
+  return useQuery({
+    queryKey: providerKeys.app(appId),
+    queryFn: () => providersApi.list(appId),
+  });
+}
+
+export function useSwitchProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: providersApi.switch,
+    onSuccess: () => qc.invalidateQueries({ queryKey: providerKeys.all }),
+  });
+}
+```
+
+**乐观更新** + **失效后重取**的经典模式。
+
+## API 层：lib/api
+
+`src/lib/api/` 封装 IPC 调用：
+
+```typescript
+// 示例：providers.ts
+export const providersApi = {
+  list: (appId: AppId): Promise<Provider[]> =>
+    invoke("list_providers", { appId }),
+  switch: (args) => invoke("switch_provider", args),
+  add: (p) => invoke("add_provider", { provider: p }),
+  update: (p) => invoke("update_provider", { provider: p }),
+  delete: (id) => invoke("delete_provider", { id }),
+};
+```
+
+**所有对 `invoke` 的调用都集中在 `lib/api/`**——这使得：
+1. TypeScript 类型约束集中一处
+2. 错误处理一致（通过 `extractErrorMessage`）
+3. 未来如果要加 mock，只需替换这一层
+
+## 事件监听：lib/api/events.ts
+
+```typescript
+await listen<ProviderSwitchEvent>("provider-switched", (evt) => {
+  queryClient.invalidateQueries(...);
+  toast.success(`已切换到 ${evt.payload.providerName}`);
+});
+```
+
+后端事件与前端 Query 失效机制协同。
+
+## Context 与 Hook
+
+### Context：全局 UI 状态
+
+```
+contexts/
+├── UpdateContext.tsx        # 更新状态（有无新版本）
+└── theme-provider.tsx       # 主题（light/dark/system）
+```
+
+### Hooks：业务逻辑复用
+
+```
+hooks/
+├── useProviderActions.ts    # 添加/编辑/删除/切换 actions
+├── useOpenClaw.ts           # OpenClaw 健康查询
+├── useProxyStatus.ts        # 代理状态订阅
+├── useAutoCompact.ts        # 窗口自适应
+├── useLastValidValue.ts     # 防抖保留最后有效值
+└── ...
+```
+
+## shadcn/ui 基础组件
+
+`src/components/ui/` 是 shadcn/ui 生成的无头组件：
+
+```
+Button / Dialog / Dropdown / Input / Select / Switch / Tabs /
+Popover / Tooltip / ScrollArea / Accordion / Checkbox /
+Collapsible / Label / Badge / Sonner (Toast) / Command
+```
+
+**约定**：业务组件只使用 `components/ui/` 和 `lucide-react` 图标，不直接使用 Radix。这保持了样式一致性。
+
+## 国际化：i18n/
+
+```
+i18n/
+├── index.ts                 # i18next 初始化
+├── en.json
+├── zh-CN.json
+└── ja.json
+```
+
+使用方式（所有业务组件）：
+
+```tsx
+const { t } = useTranslation();
+return <button>{t("providers.addNew")}</button>;
+```
+
+## 本章速查表
+
+| 文件 | 职责 |
+|------|------|
+| `src/App.tsx` | 顶层应用 |
+| `src/main.tsx` | bootstrap + 错误处理 |
+| `src/lib/query/` | TanStack Query 封装 |
+| `src/lib/api/` | IPC 调用封装 |
+| `src/hooks/` | 业务 hooks |
+| `src/components/ui/` | shadcn/ui 基础组件 |
+| `src/i18n/` | 多语言 |
