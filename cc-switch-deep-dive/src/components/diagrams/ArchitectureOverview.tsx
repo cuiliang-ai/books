@@ -397,49 +397,86 @@ export default function ArchitectureOverview() {
         </div>
       </div>
 
-      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 0 }}>
-        {layers.map((layer, i) => (
-          <div key={layer.id}>
-            {renderLayer(layer)}
-            {i < layers.length - 1 && (
-              <div
-                style={{
-                  textAlign: 'center',
-                  fontSize: 13,
-                  color: palette.arrow,
-                  lineHeight: '22px',
-                  userSelect: 'none',
-                  padding: '4px 0',
-                }}
-              >
-                ↓ 调用 / 写入
-              </div>
-            )}
-          </div>
-        ))}
-        <div
-          style={{
-            textAlign: 'center',
-            fontSize: 11,
-            color: palette.textMuted,
-            marginTop: 10,
-            fontStyle: 'italic',
-          }}
-        >
-          ↑ 用户态 · 本地进程 · 远端 HTTPS;代理层可选旁路
-        </div>
-      </div>
-
       <div
         style={{
-          padding: '14px 16px',
-          borderTop: `1px solid ${palette.border}`,
-          background: palette.footerBg,
-          minHeight: 60,
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1fr) minmax(240px, 320px)',
+          gap: 0,
         }}
+        className="cc-arch-grid"
       >
-        {footerContent}
+        {/* Left: layer stack */}
+        <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 0, minWidth: 0 }}>
+          {layers.map((layer, i) => (
+            <div key={layer.id}>
+              {renderLayer(layer)}
+              {i < layers.length - 1 && (
+                <div
+                  style={{
+                    textAlign: 'center',
+                    fontSize: 13,
+                    color: palette.arrow,
+                    lineHeight: '22px',
+                    userSelect: 'none',
+                    padding: '4px 0',
+                  }}
+                >
+                  ↓ 调用 / 写入
+                </div>
+              )}
+            </div>
+          ))}
+          <div
+            style={{
+              textAlign: 'center',
+              fontSize: 11,
+              color: palette.textMuted,
+              marginTop: 10,
+              fontStyle: 'italic',
+            }}
+          >
+            ↑ 用户态 · 本地进程 · 远端 HTTPS;代理层可选旁路
+          </div>
+        </div>
+
+        {/* Right: sticky detail panel */}
+        <aside
+          style={{
+            borderLeft: `1px solid ${palette.border}`,
+            background: palette.footerBg,
+            padding: 16,
+            alignSelf: 'start',
+            position: 'sticky',
+            top: 16,
+          }}
+          className="cc-arch-aside"
+        >
+          <div
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 0.5,
+              color: palette.textMuted,
+              textTransform: 'uppercase',
+              marginBottom: 10,
+            }}
+          >
+            {currentStep ? '请求追踪' : selectedModule ? '模块详情' : '提示'}
+          </div>
+          <div style={{ minHeight: 120 }}>{footerContent}</div>
+        </aside>
       </div>
+
+      <style>{`
+        @media (max-width: 820px) {
+          .cc-arch-grid { grid-template-columns: 1fr !important; }
+          .cc-arch-aside {
+            border-left: none !important;
+            border-top: 1px solid ${palette.border};
+            position: static !important;
+          }
+        }
+      `}</style>
     </div>
   );
 }

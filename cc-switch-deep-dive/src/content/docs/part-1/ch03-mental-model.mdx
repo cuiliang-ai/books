@@ -11,49 +11,6 @@ import ArchitectureOverview from '../../../components/diagrams/ArchitectureOverv
 
 <ArchitectureOverview client:only="react" />
 
-下面是同一张图的两个静态备选视图:矢量 SVG 版(适合离线阅读 / 打印)和 ASCII 版(适合终端):
-
-<details>
-<summary>静态 SVG 版本</summary>
-
-![cc-switch 架构总览](/architecture.svg)
-
-</details>
-
-<details>
-<summary>展开 ASCII 版本</summary>
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                    用户桌面 (macOS / Windows / Linux)          │
-│                                                                │
-│   ┌──────────────────┐           ┌──────────────────┐          │
-│   │  cc-switch UI    │           │    系统托盘      │          │
-│   │ (React 18 WebView)│◀──────────▶│  快速切换菜单   │          │
-│   └────────┬─────────┘           └────────┬─────────┘          │
-│            │ IPC (invoke)                 │ MenuItem click     │
-│   ┌────────▼──────────────────────────────▼─────────┐          │
-│   │          Rust 后端 (Tauri 2)                    │          │
-│   │   Commands  →  Services  →  Database (SQLite)   │          │
-│   │                                                 │          │
-│   │   SSOT: ~/.cc-switch/config.json + cc-switch.db │          │
-│   │      │ atomic_write (temp + rename)             │          │
-│   │      ▼                                          │          │
-│   │   Live: ~/.claude/settings.json                 │          │
-│   │         ~/.codex/*  ~/.gemini/*  ~/.openclaw/*  │          │
-│   │                                                 │          │
-│   │   本地代理 127.0.0.1:PORT (Axum + Hyper)        │          │
-│   │   Router · Circuit Breaker · Failover · SSE     │          │
-│   └─────────────────────┬───────────────────────────┘          │
-│         Claude CLI ─────┼───── Codex ─── Gemini ─── OpenClaw   │
-└───────────────────────────────────────────────────────────────┘
-                             │  HTTPS
-                             ▼
-                   LLM Provider (Anthropic / OpenAI / Google / ...)
-```
-
-</details>
-
 ## 三种典型流程
 
 ### 流程 A：切换 Provider（不开代理）
