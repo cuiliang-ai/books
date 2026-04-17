@@ -7,6 +7,11 @@ sidebar:
 
 ## 一张图记住 cc-switch
 
+![cc-switch 架构总览](/architecture.svg)
+
+<details>
+<summary>展开 ASCII 版本</summary>
+
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                    用户桌面 (macOS / Windows / Linux)          │
@@ -15,56 +20,28 @@ sidebar:
 │   │  cc-switch UI    │           │    系统托盘      │          │
 │   │ (React 18 WebView)│◀──────────▶│  快速切换菜单   │          │
 │   └────────┬─────────┘           └────────┬─────────┘          │
-│            │                              │                    │
 │            │ IPC (invoke)                 │ MenuItem click     │
-│            │                              │                    │
 │   ┌────────▼──────────────────────────────▼─────────┐          │
 │   │          Rust 后端 (Tauri 2)                    │          │
-│   │                                                 │          │
 │   │   Commands  →  Services  →  Database (SQLite)   │          │
-│   │                    │                            │          │
-│   │                    ▼                            │          │
-│   │   ┌─────────────────────────────────────────┐   │          │
-│   │   │  SSOT: ~/.cc-switch/config.json         │   │          │
-│   │   │  + ~/.cc-switch/cc-switch.db            │   │          │
-│   │   └───────────────┬─────────────────────────┘   │          │
-│   │                   │ atomic_write (temp + rename)│          │
-│   │                   ▼                             │          │
-│   │   ┌─────────────────────────────────────────┐   │          │
-│   │   │  Live 配置文件:                         │   │          │
-│   │   │  ~/.claude/settings.json                │   │          │
-│   │   │  ~/.codex/config.toml + auth.json       │   │          │
-│   │   │  ~/.gemini/settings.json                │   │          │
-│   │   │  ~/.config/opencode/...                 │   │          │
-│   │   │  ~/.openclaw/...                        │   │          │
-│   │   └─────────────────────────────────────────┘   │          │
 │   │                                                 │          │
-│   │   ┌─────────────────────────────────────────┐   │          │
-│   │   │  本地代理 (可选，127.0.0.1:PORT)        │   │          │
-│   │   │   Axum + Hyper + rustls                 │   │          │
-│   │   │   ├─ Provider Router                    │   │          │
-│   │   │   ├─ Circuit Breaker                    │   │          │
-│   │   │   ├─ Failover Switch                    │   │          │
-│   │   │   └─ SSE 流式转发                       │   │          │
-│   │   └─────────────────────┬───────────────────┘   │          │
-│   └─────────────────────────┼───────────────────────┘          │
-│                             │                                  │
-│         ┌───────────────────┼───────────────────┐              │
-│         │                   │                   │              │
-│     ┌───▼──┐            ┌───▼──┐            ┌───▼──┐           │
-│     │Claude│            │Codex │            │Gemini│           │
-│     │ CLI  │            │ CLI  │            │ CLI  │           │
-│     └──────┘            └──────┘            └──────┘           │
-└────────────────────────────────────────────────────────────────┘
+│   │   SSOT: ~/.cc-switch/config.json + cc-switch.db │          │
+│   │      │ atomic_write (temp + rename)             │          │
+│   │      ▼                                          │          │
+│   │   Live: ~/.claude/settings.json                 │          │
+│   │         ~/.codex/*  ~/.gemini/*  ~/.openclaw/*  │          │
+│   │                                                 │          │
+│   │   本地代理 127.0.0.1:PORT (Axum + Hyper)        │          │
+│   │   Router · Circuit Breaker · Failover · SSE     │          │
+│   └─────────────────────┬───────────────────────────┘          │
+│         Claude CLI ─────┼───── Codex ─── Gemini ─── OpenClaw   │
+└───────────────────────────────────────────────────────────────┘
                              │  HTTPS
                              ▼
-                    ┌────────────────┐
-                    │ LLM Provider   │
-                    │ OpenAI/Anthropic│
-                    │ Google/DeepSeek │
-                    │ ...            │
-                    └────────────────┘
+                   LLM Provider (Anthropic / OpenAI / Google / ...)
 ```
+
+</details>
 
 ## 三种典型流程
 
