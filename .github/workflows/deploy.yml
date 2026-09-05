@@ -58,6 +58,9 @@ jobs:
       - name: Copy index page
         run: cp index.html output/
 
+      - name: Copy crawler policy
+        run: cp robots.txt output/robots.txt
+
       - name: Copy CNAME (if exists)
         run: test -f CNAME && cp CNAME output/ || echo "No CNAME file, skipping"
 
